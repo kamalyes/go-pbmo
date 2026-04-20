@@ -12,9 +12,9 @@
 package pbmo
 
 import (
-	"testing"
-
 	"github.com/stretchr/testify/assert"
+	"testing"
+	"time"
 )
 
 func TestNewBidiConverter(t *testing.T) {
@@ -226,4 +226,60 @@ func TestConvertModelToPB_PointerModel(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, "ptr_model", pb.Value)
 	assert.Equal(t, int32(8), pb.Count)
+}
+
+func TestBidiConverter_ChainCall(t *testing.T) {
+	bc := NewBidiConverter(TestPBWithMapping{}, TestModelWithMapping{}).
+		WithFieldMapping("ID", "ClientId").
+		WithFieldMapping("Name", "UserName").
+		WithAutoTimeConversion(true).
+		WithValidation(false).
+		WithTagMapping(true)
+
+	pb := TestPBWithMapping{ClientId: 1, UserName: "chain_test", UserEmail: "chain@test.com"}
+	var model TestModelWithMapping
+
+	err := bc.ConvertPBToModel(pb, &model)
+	assert.NoError(t, err)
+	assert.Equal(t, uint64(1), model.ID)
+	assert.Equal(t, "chain_test", model.Name)
+	assert.Equal(t, "chain@test.com", model.Email)
+}
+
+func TestBidiConverter_ChainCall_WithFieldMappings(t *testing.T) {
+	bc := NewBidiConverter(TestPBWithMapping{}, TestModelWithMapping{}).
+		WithFieldMappings(map[string]string{
+			"ID":   "ClientId",
+			"Name": "UserName",
+		}).
+		WithAutoTimeConversion(false)
+
+	pb := TestPBWithMapping{ClientId: 3, UserName: "batch_chain", UserEmail: "batch@chain.com"}
+	var model TestModelWithMapping
+
+	err := bc.ConvertPBToModel(pb, &model)
+	assert.NoError(t, err)
+	assert.Equal(t, uint64(3), model.ID)
+	assert.Equal(t, "batch_chain", model.Name)
+}
+
+func TestBidiConverter_ChainCall_OptionsModified(t *testing.T) {
+	bc := NewBidiConverter(TestSimplePB{}, TestSimpleModel{}).
+		WithAutoTimeConversion(false).
+		WithValidation(true).
+		WithDesensitize(true).
+		WithSafeMode(true).
+		WithTagName("custom").
+		WithConcurrency(4).
+		WithBatchSize(50).
+		WithTimeout(10 * time.Second)
+
+	assert.False(t, bc.options.AutoTimeConversion)
+	assert.True(t, bc.options.ValidationEnabled)
+	assert.True(t, bc.options.DesensitizeEnabled)
+	assert.True(t, bc.options.SafeMode)
+	assert.Equal(t, "custom", bc.options.TagName)
+	assert.Equal(t, 4, bc.options.Concurrency)
+	assert.Equal(t, 50, bc.options.BatchSize)
+	assert.Equal(t, 10*time.Second, bc.options.Timeout)
 }

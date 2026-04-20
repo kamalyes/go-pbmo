@@ -13,12 +13,11 @@
 package pbmo
 
 import (
+	"github.com/kamalyes/go-toolbox/pkg/syncx"
+	"google.golang.org/protobuf/types/known/timestamppb"
 	"reflect"
 	"sync"
 	"time"
-
-	"github.com/kamalyes/go-toolbox/pkg/syncx"
-	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 // Converter 核心转换器接口
@@ -78,11 +77,73 @@ func (bc *BidiConverter) WithFieldMapping(modelFieldName, pbFieldName string) *B
 	return bc
 }
 
+// WithFieldMappings 批量设置字段名映射（链式调用）
+func (bc *BidiConverter) WithFieldMappings(mappings map[string]string) *BidiConverter {
+	for modelField, pbField := range mappings {
+		bc.fieldMapping.Store(modelField, pbField)
+	}
+	return bc
+}
+
 // RegisterFieldMapping 批量注册字段映射
 func (bc *BidiConverter) RegisterFieldMapping(mappings map[string]string) {
 	for modelField, pbField := range mappings {
 		bc.fieldMapping.Store(modelField, pbField)
 	}
+}
+
+// WithAutoTimeConversion 设置自动时间转换（链式调用）
+func (bc *BidiConverter) WithAutoTimeConversion(enabled bool) *BidiConverter {
+	bc.options.AutoTimeConversion = enabled
+	return bc
+}
+
+// WithTagMapping 启用/禁用 struct tag 映射（链式调用）
+func (bc *BidiConverter) WithTagMapping(enabled bool) *BidiConverter {
+	bc.options.TagMappingEnabled = enabled
+	return bc
+}
+
+// WithTagName 设置 struct tag 名称（链式调用）
+func (bc *BidiConverter) WithTagName(name string) *BidiConverter {
+	bc.options.TagName = name
+	return bc
+}
+
+// WithValidation 启用/禁用校验（链式调用）
+func (bc *BidiConverter) WithValidation(enabled bool) *BidiConverter {
+	bc.options.ValidationEnabled = enabled
+	return bc
+}
+
+// WithDesensitize 启用/禁用脱敏（链式调用）
+func (bc *BidiConverter) WithDesensitize(enabled bool) *BidiConverter {
+	bc.options.DesensitizeEnabled = enabled
+	return bc
+}
+
+// WithSafeMode 启用/禁用安全模式（链式调用）
+func (bc *BidiConverter) WithSafeMode(enabled bool) *BidiConverter {
+	bc.options.SafeMode = enabled
+	return bc
+}
+
+// WithConcurrency 设置并发数（链式调用）
+func (bc *BidiConverter) WithConcurrency(n int) *BidiConverter {
+	bc.options.Concurrency = n
+	return bc
+}
+
+// WithBatchSize 设置批处理大小（链式调用）
+func (bc *BidiConverter) WithBatchSize(size int) *BidiConverter {
+	bc.options.BatchSize = size
+	return bc
+}
+
+// WithTimeout 设置超时时间（链式调用）
+func (bc *BidiConverter) WithTimeout(timeout time.Duration) *BidiConverter {
+	bc.options.Timeout = timeout
+	return bc
 }
 
 // GetModelType 获取 Model 类型
