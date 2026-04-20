@@ -16,7 +16,7 @@
 
 <br>
 
-*[📖 快速开始](#快速开始)* · *[🎯 性能测试](#性能基准)* · *[🧪 测试覆盖](#测试)*
+*[📖 快速开始](#快速开始)* · *[📚 详细文档](#详细文档)* · *[📊 性能基准](#性能基准)*
 
 </div>
 
@@ -35,7 +35,7 @@
 - 🔢 **枚举映射** - 支持 int32 和泛型枚举映射
 - 🎭 **脱敏转换** - 集成 go-toolbox/desensitize
 - 🛡️ **安全转换** - 集成 go-toolbox/safe 避免 nil panic
-- ⚙️ **选项模式** - Functional Options 灵活配置
+- ⚙️ **选项模式** - Functional Options + 链式调用灵活配置
 
 ## 🏗️ 架构概览
 
@@ -190,6 +190,18 @@ converter := pbmo.NewBidiConverter(PB{}, Model{},
 )
 ```
 
+### 链式调用
+
+```go
+converter := pbmo.NewBidiConverter(UserPB{}, UserModel{}).
+    WithAutoTimeConversion(true).
+    WithValidation(true).
+    WithFieldMapping("ID", "Id").
+    WithDesensitize(true)
+```
+
+> 💡 更多用法请参阅 [详细文档](#详细文档)
+
 ### 批量转换
 
 ```go
@@ -279,17 +291,22 @@ go test -bench=. -benchmem
 go test -run TestConverter -v
 ```
 
-## 🤝 与 go-rpc-gateway 集成
+## 📚 详细文档
 
-go-pbmo 可直接替换 go-rpc-gateway 中的旧 pbmo 模块，主要 API 完全兼容：
-
-```go
-// 旧 import
-// "github.com/kamalyes/go-rpc-gateway/pbmo"
-
-// 新 import
-pbmo "github.com/kamalyes/go-pbmo"
-```
+| 编号 | 文档 | 说明 |
+|------|------|------|
+| 01 | [快速开始](docs/01.快速开始.md) | 安装、最小示例、核心 API |
+| 02 | [字段映射](docs/02.字段映射.md) | struct tag、手动映射、优先级 |
+| 03 | [字段转换器](docs/03.字段转换器.md) | TransformerFunc、注册、常见场景 |
+| 04 | [参数校验](docs/04.参数校验.md) | FieldRule、ValidationErrors、中间件集成 |
+| 05 | [批量转换](docs/05.批量转换.md) | 基础批量、安全批量、BatchResult |
+| 06 | [注册中心](docs/06.注册中心.md) | Registry、全局便捷函数、多类型管理 |
+| 07 | [枚举映射](docs/07.枚举映射.md) | EnumMapper、GenericEnumMapper、AutoEnumConverter |
+| 08 | [脱敏转换](docs/08.脱敏转换.md) | DesensitizeConverter、脱敏 Tag、自定义脱敏器 |
+| 09 | [安全转换](docs/09.安全转换.md) | SafeConverter、安全字段访问、SafeAccess |
+| 10 | [时间转换](docs/10.时间转换.md) | 自动时间转换、手动转换函数 |
+| 11 | [选项模式](docs/11.选项模式.md) | Functional Options、链式调用、常见组合 |
+| 12 | [错误处理](docs/12.错误处理.md) | 类型化错误体系、错误判断、最佳实践 |
 
 ## 📄 许可证
 
