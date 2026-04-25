@@ -143,26 +143,41 @@ func (r *Registry) ConvertModelToPB(model, pb interface{}) error {
 // 全局便捷函数
 
 // RegisterConverter 向全局注册中心注册转换器
+//
+// Deprecated: 使用泛型函数 Register[M, P]() 替代，自动创建并缓存转换器
+// 示例: pbmo.Register[UserModel, UserPB]()
 func RegisterConverter(converter *BidiConverter) error {
 	return globalRegistry.Register(converter)
 }
 
 // MustRegisterConverter 向全局注册中心注册转换器（已存在则 panic）
+//
+// Deprecated: 使用泛型函数 Register[M, P]() 替代，自动创建并缓存转换器
+// 示例: pbmo.Register[UserModel, UserPB]()
 func MustRegisterConverter(converter *BidiConverter) {
 	globalRegistry.MustRegister(converter)
 }
 
 // GetConverter 从全局注册中心获取转换器
+//
+// Deprecated: 使用泛型函数 ConverterFor[M, P]() 替代，类型安全无需 reflect
+// 示例: c := pbmo.ConverterFor[UserModel, UserPB]()
 func GetConverter(pbType, modelType reflect.Type) (*BidiConverter, error) {
 	return globalRegistry.Lookup(pbType, modelType)
 }
 
 // ConvertPBToModel 通过全局注册中心执行 PB -> Model 转换
+//
+// Deprecated: 使用泛型函数 FromPB[P, M](pb) 替代，类型安全无需传指针
+// 示例: model, err := pbmo.FromPB[UserPB, UserModel](pb)
 func ConvertPBToModel(pb, model interface{}) error {
 	return globalRegistry.ConvertPBToModel(pb, model)
 }
 
 // ConvertModelToPB 通过全局注册中心执行 Model -> PB 转换
+//
+// Deprecated: 使用泛型函数 ToPB[M, P](model) 替代，类型安全无需传指针。
+// 示例: pb, err := pbmo.ToPB[UserModel, UserPB](model)
 func ConvertModelToPB(model, pb interface{}) error {
 	return globalRegistry.ConvertModelToPB(model, pb)
 }

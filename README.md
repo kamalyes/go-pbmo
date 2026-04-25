@@ -25,13 +25,14 @@
 ## ✨ 特性亮点
 
 - 🚀 **高性能转换** - 单次 PB ↔ Model 转换 ~1.2µs，枚举映射 ~33ns，零内存分配热路径
+- 🎯 **泛型便捷函数** - `ToPB` / `FromPB` / `ToPBs` / `FromPBs` 一行搞定，类型安全无需 reflect
 - 🔄 **双向转换** - PB → Model 和 Model → PB 一致性保证
 - 🗺️ **字段映射** - 支持 struct tag 和手动映射两种方式
 - ⚡ **字段转换器** - 自定义字段级别转换逻辑
 - ⏰ **自动时间转换** - `time.Time` ↔ `*timestamppb.Timestamp` 自动处理
 - ✅ **参数校验** - 字段级校验规则（必填、长度、范围、正则、自定义）
-- 📦 **批量转换** - 批量 PB ↔ Model 转换，含安全批量模式
-- 🗂️ **注册中心** - 统一管理多个转换器实例，全局便捷函数
+- 📦 **批量转换** - 泛型批量 `ToPBs` / `FromPBs` / `SafeToPBs` / `SafeFromPBs`
+- 🗂️ **注册中心** - `Register[M, P]()` 一行注册，`ConverterFor[M, P]()` 按需获取
 - 🔢 **枚举映射** - 支持 int32 和泛型枚举映射
 - 🎭 **脱敏转换** - 集成 go-toolbox/desensitize
 - 🛡️ **安全转换** - 集成 go-toolbox/safe 避免 nil panic
@@ -41,96 +42,44 @@
 
 ```mermaid
 graph TB
-    A["🔄 go-pbmo"] --> B["🚀 核心转换"]
-    A --> C["⚡ 扩展能力"]
-    A --> D["🏗️ 基础设施"]
-    A --> E["🛠️ 集成工具"]
+    A["🔄 go-pbmo"] --> B["🎯 泛型 API"]
+    A --> C["🚀 核心转换"]
+    A --> D["⚡ 扩展能力"]
+    A --> E["🏗️ 基础设施"]
+    A --> F["🛠️ 集成工具"]
 
-    B --> B1["📦 BidiConverter<br/>双向转换器"]
-    B --> B2["📚 Batch<br/>批量转换"]
-    B --> B3["🏛️ Registry<br/>注册中心"]
+    B --> B1["Register[M, P]<br/>一行注册"]
+    B --> B2["ToPB / FromPB<br/>单条转换"]
+    B --> B3["ToPBs / FromPBs<br/>批量转换"]
+    B --> B4["SafeToPBs / SafeFromPBs<br/>安全批量"]
 
-    C --> C1["🔧 Transformer<br/>字段转换器"]
-    C --> C2["✅ Validator<br/>参数校验"]
-    C --> C3["🔢 EnumMapper<br/>枚举映射"]
-    C --> C4["🎭 Desensitize<br/>脱敏转换"]
-    C --> C5["🛡️ SafeConverter<br/>安全转换"]
+    C --> C1["📦 BidiConverter<br/>双向转换器"]
+    C --> C2["📚 Batch<br/>批量转换"]
+    C --> C3["🏛️ Registry<br/>注册中心"]
 
-    D --> D1["❌ Errors<br/>类型化错误"]
-    D --> D2["⚙️ Options<br/>选项模式"]
-    D --> D3["🔍 Helpers<br/>反射工具"]
-    D --> D4["⏰ Time<br/>时间转换"]
+    D --> D1["🔧 Transformer<br/>字段转换器"]
+    D --> D2["✅ Validator<br/>参数校验"]
+    D --> D3["🔢 EnumMapper<br/>枚举映射"]
+    D --> D4["🎭 Desensitize<br/>脱敏转换"]
+    D --> D5["🛡️ SafeConverter<br/>安全转换"]
 
-    E --> E1["syncx<br/>并发安全Map"]
-    E --> E2["errorx<br/>类型化错误"]
-    E --> E3["safe<br/>安全访问"]
-    E --> E4["desensitize<br/>数据脱敏"]
+    E --> E1["❌ Errors<br/>类型化错误"]
+    E --> E2["⚙️ Options<br/>选项模式"]
+    E --> E3["🔍 Helpers<br/>反射工具"]
+    E --> E4["⏰ Time<br/>时间转换"]
+
+    F --> F1["syncx<br/>并发安全Map"]
+    F --> F2["errorx<br/>类型化错误"]
+    F --> F3["safe<br/>安全访问"]
+    F --> F4["desensitize<br/>数据脱敏"]
 
     style A fill:#4CAF50,color:#fff
-    style B fill:#2196F3,color:#fff
-    style C fill:#FF9800,color:#fff
-    style D fill:#9C27B0,color:#fff
-    style E fill:#607D8B,color:#fff
+    style B fill:#E91E63,color:#fff
+    style C fill:#2196F3,color:#fff
+    style D fill:#FF9800,color:#fff
+    style E fill:#9C27B0,color:#fff
+    style F fill:#607D8B,color:#fff
 ```
-
-## 🔄 转换流程
-
-```mermaid
-flowchart LR
-    subgraph INPUT["📥 输入"]
-        PB["📦 PB 对象"]
-        MODEL["🏠 Model 对象"]
-    end
-
-    subgraph PROCESS["⚙️ 转换流程"]
-        direction TB
-        S["🔍 源对象"] --> TM{"🏷️ Tag映射?"}
-        TM -->|"是"| FM["📝 字段名映射"]
-        TM -->|"否"| DF["⚡ 直接匹配"]
-        FM --> TF{"🔧 转换器?"}
-        DF --> TF
-        TF -->|"是"| AT["✨ 应用转换器"]
-        TF -->|"否"| CT["🔄 类型转换"]
-        AT --> CT
-        CT --> V{"✅ 启用校验?"}
-        V -->|"是"| VL["🛡️ 执行校验"]
-        V -->|"否"| OUT["📤 目标对象"]
-        VL --> OUT
-    end
-
-    subgraph OUTPUT["📤 输出"]
-        OUT1["📦 PB 对象"]
-        OUT2["🏠 Model 对象"]
-    end
-
-    PB -->|"ConvertPBToModel"| PROCESS
-    MODEL -->|"ConvertModelToPB"| PROCESS
-    PROCESS --> OUT1
-    PROCESS --> OUT2
-
-    style PB fill:#2196F3,stroke:#1976D2,color:#fff
-    style MODEL fill:#4CAF50,stroke:#388E3C,color:#fff
-    style S fill:#9C27B0,stroke:#7B1FA2,color:#fff
-    style OUT1 fill:#2196F3,stroke:#1976D2,color:#fff
-    style OUT2 fill:#4CAF50,stroke:#388E3C,color:#fff
-```
-
-## 🧰 模块一览
-
-| 模块 | 文件 | 功能描述 | 使用场景 |
-|------|------|----------|----------|
-| 🔄 核心转换 | [converter.go](converter.go) | BidiConverter 双向转换 | PB ↔ Model 转换 |
-| 📦 批量转换 | [batch.go](batch.go) | 批量转换、安全批量 | 列表数据转换 |
-| 🗂️ 注册中心 | [registry.go](registry.go) | 转换器统一管理 | 多类型转换场景 |
-| ⚡ 字段转换 | [transform.go](transform.go) | 字段级自定义转换 | 数据格式化、类型适配 |
-| ✅ 参数校验 | [validate.go](validate.go) | 字段校验规则 | 数据验证 |
-| 🔢 枚举映射 | [enum.go](enum.go) | int32/泛型枚举映射 | 枚举类型转换 |
-| 🎭 脱敏转换 | [desensitize.go](desensitize.go) | 数据脱敏 | 隐私保护 |
-| 🛡️ 安全转换 | [safe.go](safe.go) | nil 安全转换 | 防止 panic |
-| ⏰ 时间转换 | [time.go](time.go) | Time ↔ Timestamp | 时间字段处理 |
-| 🔧 辅助函数 | [helpers.go](helpers.go) | 反射工具、类型判断 | 内部使用 |
-| ❌ 错误定义 | [errors.go](errors.go) | 类型化错误体系 | 错误处理 |
-| ⚙️ 选项模式 | [option.go](option.go) | Functional Options | 配置管理 |
 
 ## 🚀 快速开始
 
@@ -140,7 +89,9 @@ flowchart LR
 go get github.com/kamalyes/go-pbmo
 ```
 
-### 基础用法
+### 泛型 API（推荐）
+
+泛型 API 是最简洁的使用方式，利用 `reflect.Type` 做 key + `sync.Map` 缓存，消除样板代码：
 
 ```go
 package main
@@ -165,28 +116,59 @@ type UserModel struct {
 }
 
 func main() {
-    converter := pbmo.NewBidiConverter(UserPB{}, UserModel{})
+    // 一行注册（自动缓存，无需重复调用）
+    pbmo.Register[UserModel, UserPB]()
 
-    // PB -> Model
-    pb := UserPB{Id: 1, Name: "张三", Email: "test@example.com", Age: 25}
-    var model UserModel
-    converter.ConvertPBToModel(pb, &model)
+    // 单条转换
+    pb, _ := pbmo.ToPB[UserModel, UserPB](&UserModel{ID: 1, Name: "张三", Age: 25})
+    model, _ := pbmo.FromPB[UserPB, UserModel](&UserPB{Id: 2, Name: "李四", Age: 30})
 
-    // Model -> PB
-    model2 := UserModel{ID: 2, Name: "李四", Age: 30}
-    var pb2 UserPB
-    converter.ConvertModelToPB(model2, &pb2)
+    // 批量转换
+    models := []*UserModel{{ID: 1, Name: "a"}, {ID: 2, Name: "b"}}
+    pbs, _ := pbmo.ToPBs[UserModel, UserPB](models)
+
+    // 安全批量转换（不因单个失败中断）
+    pbs2, result := pbmo.SafeToPBs[UserModel, UserPB](models)
+    fmt.Printf("成功: %d, 失败: %d\n", result.SuccessCount, result.FailureCount)
 }
+```
+
+### 传统 API（仍可用）
+
+> ⚠️ 传统 API 已标记为 **Deprecated**，建议迁移到泛型 API
+
+```go
+// 手动创建转换器
+converter := pbmo.NewBidiConverter(UserPB{}, UserModel{})
+
+// PB -> Model
+var model UserModel
+converter.ConvertPBToModel(pb, &model)
+
+// Model -> PB
+var pb2 UserPB
+converter.ConvertModelToPB(model2, &pb2)
+
+// 批量转换（已废弃，请用 ToPBs / FromPBs）
+var models []UserModel
+converter.BatchConvertPBToModel(pbs, &models) // Deprecated
 ```
 
 ### 带选项配置
 
 ```go
-converter := pbmo.NewBidiConverter(PB{}, Model{},
+// 泛型方式
+pbmo.RegisterWith[UserModel, UserPB](
     pbmo.WithAutoTimeConversion(true),
     pbmo.WithValidation(true),
     pbmo.WithFieldMapping("ID", "Id"),
     pbmo.WithDesensitize(true),
+)
+
+// 传统方式
+converter := pbmo.NewBidiConverter(PB{}, Model{},
+    pbmo.WithAutoTimeConversion(true),
+    pbmo.WithValidation(true),
 )
 ```
 
@@ -200,26 +182,52 @@ converter := pbmo.NewBidiConverter(UserPB{}, UserModel{}).
     WithDesensitize(true)
 ```
 
-> 💡 更多用法请参阅 [详细文档](#详细文档)
+## 📋 泛型 API 速查表
 
-### 批量转换
+| 函数 | 签名 | 说明 |
+|------|------|------|
+| `Register` | `Register[M, P]() *BidiConverter` | 注册转换对（默认配置） |
+| `RegisterWith` | `RegisterWith[M, P](opts...) *BidiConverter` | 注册转换对（自定义配置） |
+| `ToPB` | `ToPB[M, P](m *M) (*P, error)` | Model → PB |
+| `FromPB` | `FromPB[P, M](pb *P) (*M, error)` | PB → Model |
+| `ToPBs` | `ToPBs[M, P](models []*M) ([]*P, error)` | 批量 Model → PB，遇错即停 |
+| `FromPBs` | `FromPBs[P, M](pbs []*P) ([]*M, error)` | 批量 PB → Model，遇错即停 |
+| `SafeToPBs` | `SafeToPBs[M, P](models []*M) ([]*P, *BatchResult)` | 安全批量 Model → PB |
+| `SafeFromPBs` | `SafeFromPBs[P, M](pbs []*P) ([]*M, *BatchResult)` | 安全批量 PB → Model |
+| `ConverterFor` | `ConverterFor[M, P]() *BidiConverter` | 获取已注册的转换器 |
 
-```go
-pbs := []UserPB{{Id: 1, Name: "张三"}, {Id: 2, Name: "李四"}}
-var models []UserModel
-converter.BatchConvertPBToModel(pbs, &models)
-```
+## 🔄 迁移指南
 
-### 注册中心
+| 旧 API（Deprecated） | 新 API（推荐） |
+|----------------------|---------------|
+| `NewBidiConverter(PB{}, Model{})` + `RegisterConverter(c)` | `Register[Model, PB]()` |
+| `converter.ConvertModelToPB(m, &pb)` | `ToPB[Model, PB](m)` |
+| `converter.ConvertPBToModel(pb, &model)` | `FromPB[PB, Model](pb)` |
+| `converter.BatchConvertModelToPB(models, &pbs)` | `ToPBs[Model, PB](models)` |
+| `converter.BatchConvertPBToModel(pbs, &models)` | `FromPBs[PB, Model](pbs)` |
+| `converter.SafeBatchConvertModelToPB(models, &pbs)` | `SafeToPBs[Model, PB](models)` |
+| `converter.SafeBatchConvertPBToModel(pbs, &models)` | `SafeFromPBs[PB, Model](pbs)` |
+| `GetConverter(pbType, modelType)` | `ConverterFor[Model, PB]()` |
+| `ConvertPBToModel(pb, &model)` | `FromPB[PB, Model](pb)` |
+| `ConvertModelToPB(model, &pb)` | `ToPB[Model, PB](model)` |
 
-```go
-registry := pbmo.NewRegistry()
-registry.MustRegister(converter)
+## 🧰 模块一览
 
-// 全局便捷函数
-pbmo.MustRegisterConverter(converter)
-pbmo.ConvertPBToModel(pb, &model)
-```
+| 模块 | 文件 | 功能描述 | 使用场景 |
+|------|------|----------|----------|
+| 🎯 泛型 API | [generic.go](generic.go) | 一行注册、一行转换 | **推荐首选** |
+| 🔄 核心转换 | [converter.go](converter.go) | BidiConverter 双向转换 | PB ↔ Model 转换 |
+| 📦 批量转换 | [batch.go](batch.go) | 批量转换、安全批量 | 列表数据转换 |
+| 🗂️ 注册中心 | [registry.go](registry.go) | 转换器统一管理 | 多类型转换场景 |
+| ⚡ 字段转换 | [transform.go](transform.go) | 字段级自定义转换 | 数据格式化、类型适配 |
+| ✅ 参数校验 | [validate.go](validate.go) | 字段校验规则 | 数据验证 |
+| 🔢 枚举映射 | [enum.go](enum.go) | int32/泛型枚举映射 | 枚举类型转换 |
+| 🎭 脱敏转换 | [desensitize.go](desensitize.go) | 数据脱敏 | 隐私保护 |
+| 🛡️ 安全转换 | [safe.go](safe.go) | nil 安全转换 | 防止 panic |
+| ⏰ 时间转换 | [time.go](time.go) | Time ↔ Timestamp | 时间字段处理 |
+| 🔧 辅助函数 | [helpers.go](helpers.go) | 反射工具、类型判断 | 内部使用 |
+| ❌ 错误定义 | [errors.go](errors.go) | 类型化错误体系 | 错误处理 |
+| ⚙️ 选项模式 | [option.go](option.go) | Functional Options | 配置管理 |
 
 ## 📊 性能基准
 
@@ -295,12 +303,12 @@ go test -run TestConverter -v
 
 | 编号 | 文档 | 说明 |
 |------|------|------|
-| 01 | [快速开始](docs/01.快速开始.md) | 安装、最小示例、核心 API |
+| 01 | [快速开始](docs/01.快速开始.md) | 安装、泛型 API、核心 API |
 | 02 | [字段映射](docs/02.字段映射.md) | struct tag、手动映射、优先级 |
 | 03 | [字段转换器](docs/03.字段转换器.md) | TransformerFunc、注册、常见场景 |
 | 04 | [参数校验](docs/04.参数校验.md) | FieldRule、ValidationErrors、中间件集成 |
-| 05 | [批量转换](docs/05.批量转换.md) | 基础批量、安全批量、BatchResult |
-| 06 | [注册中心](docs/06.注册中心.md) | Registry、全局便捷函数、多类型管理 |
+| 05 | [批量转换](docs/05.批量转换.md) | 泛型批量、安全批量、BatchResult |
+| 06 | [注册中心](docs/06.注册中心.md) | Registry、泛型注册、多类型管理 |
 | 07 | [枚举映射](docs/07.枚举映射.md) | EnumMapper、GenericEnumMapper、AutoEnumConverter |
 | 08 | [脱敏转换](docs/08.脱敏转换.md) | DesensitizeConverter、脱敏 Tag、自定义脱敏器 |
 | 09 | [安全转换](docs/09.安全转换.md) | SafeConverter、安全字段访问、SafeAccess |

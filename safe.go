@@ -83,6 +83,9 @@ func SafeGetNestedField(obj interface{}, path string) *safe.SafeAccess {
 
 // SafeBatchConvertPBToModel 安全批量 PB -> Model 转换
 // 不因单个失败而中断，使用 go-toolbox/safe 检查 nil
+//
+// Deprecated: 使用泛型函数 SafeFromPBs[P, M] 替代，类型更安全、调用更简洁。
+// 示例: models, result := pbmo.SafeFromPBs[UserPB, UserModel](pbs)
 func (sc *SafeConverter) SafeBatchConvertPBToModel(pbs interface{}, modelsPtr interface{}) *BatchResult {
 	result := &BatchResult{
 		Results: make([]BatchItem, 0),

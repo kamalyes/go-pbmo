@@ -16,6 +16,9 @@ import (
 )
 
 // BatchConvertPBToModel 批量 PB -> Model 转换
+//
+// Deprecated: 使用泛型函数 FromPBs[P, M] 替代，类型更安全、调用更简洁
+// 示例: models, err := pbmo.FromPBs[UserPB, UserModel](pbs)
 func (bc *BidiConverter) BatchConvertPBToModel(pbs interface{}, modelsPtr interface{}) error {
 	pbsVal := reflect.ValueOf(pbs)
 	if pbsVal.Kind() == reflect.Ptr {
@@ -60,6 +63,9 @@ func (bc *BidiConverter) BatchConvertPBToModel(pbs interface{}, modelsPtr interf
 }
 
 // BatchConvertModelToPB 批量 Model -> PB 转换
+//
+// Deprecated: 使用泛型函数 ToPBs[M, P] 替代，类型更安全、调用更简洁
+// 示例: pbs, err := pbmo.ToPBs[UserModel, UserPB](models)
 func (bc *BidiConverter) BatchConvertModelToPB(models interface{}, pbsPtr interface{}) error {
 	modelsVal := reflect.ValueOf(models)
 	if modelsVal.Kind() == reflect.Ptr {
@@ -120,6 +126,9 @@ type BatchItem struct {
 
 // SafeBatchConvertPBToModel 安全批量 PB -> Model 转换
 // 不因单个失败而中断，收集所有结果
+//
+// Deprecated: 使用泛型函数 SafeFromPBs[P, M] 替代，类型更安全、调用更简洁
+// 示例: models, result := pbmo.SafeFromPBs[UserPB, UserModel](pbs)
 func (bc *BidiConverter) SafeBatchConvertPBToModel(pbs interface{}, modelsPtr interface{}) *BatchResult {
 	result := &BatchResult{
 		Results: make([]BatchItem, 0),
@@ -176,6 +185,9 @@ func (bc *BidiConverter) SafeBatchConvertPBToModel(pbs interface{}, modelsPtr in
 }
 
 // SafeBatchConvertModelToPB 安全批量 Model -> PB 转换
+//
+// Deprecated: 使用泛型函数 SafeToPBs[M, P] 替代，类型更安全、调用更简洁
+// 示例: pbs, result := pbmo.SafeToPBs[UserModel, UserPB](models)
 func (bc *BidiConverter) SafeBatchConvertModelToPB(models interface{}, pbsPtr interface{}) *BatchResult {
 	result := &BatchResult{
 		Results: make([]BatchItem, 0),
