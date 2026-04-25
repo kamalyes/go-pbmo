@@ -70,3 +70,45 @@ type TestNestModel struct {
 	Name   string
 	Detail *TestSimpleModel
 }
+
+// TestAllTypesPB 全类型测试 PB
+type TestAllTypesPB struct {
+	IntVal    int32
+	Int64Val  int64
+	UintVal   uint32
+	Uint64Val uint64
+	FloatVal  float32
+	DoubleVal float64
+	BoolVal   bool
+	StrVal    string
+	BytesVal  []byte
+}
+
+// TestAllTypesModel 全类型测试 Model
+type TestAllTypesModel struct {
+	IntVal    int32
+	Int64Val  int64
+	UintVal   uint32
+	Uint64Val uint64
+	FloatVal  float32
+	DoubleVal float64
+	BoolVal   bool
+	StrVal    string
+	BytesVal  []byte
+}
+
+// TestEmptyPB 空结构体 PB
+type TestEmptyPB struct{}
+
+// TestEmptyModel 空结构体 Model
+type TestEmptyModel struct{}
+
+// TestSingleFieldPB 单字段 PB
+type TestSingleFieldPB struct {
+	Name string
+}
+
+// TestSingleFieldModel 单字段 Model
+type TestSingleFieldModel struct {
+	Name string
+}

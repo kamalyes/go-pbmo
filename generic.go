@@ -67,6 +67,84 @@ func FromPB[P any, M any](pb *P) (*M, error) {
 	return model, getOrInitConverter[M, P]().ConvertPBToModel(pb, model)
 }
 
+// ToPBs 批量将 Model 切片转换为 PB 切片
+func ToPBs[M any, P any](models []*M) ([]*P, error) {
+	pbs := make([]*P, len(models))
+	c := getOrInitConverter[M, P]()
+	for i, m := range models {
+		p := new(P)
+		if err := c.ConvertModelToPB(m, p); err != nil {
+			return nil, NewBatchError("元素 %d: %v", i, err)
+		}
+		pbs[i] = p
+	}
+	return pbs, nil
+}
+
+// FromPBs 批量将 PB 切片转换为 Model 切片
+func FromPBs[P any, M any](pbs []*P) ([]*M, error) {
+	models := make([]*M, len(pbs))
+	c := getOrInitConverter[M, P]()
+	for i, pb := range pbs {
+		m := new(M)
+		if err := c.ConvertPBToModel(pb, m); err != nil {
+			return nil, NewBatchError("元素 %d: %v", i, err)
+		}
+		models[i] = m
+	}
+	return models, nil
+}
+
+// SafeToPBs 安全批量将 Model 切片转换为 PB 切片，不因单个失败而中断
+func SafeToPBs[M any, P any](models []*M) ([]*P, *BatchResult) {
+	pbs := make([]*P, len(models))
+	result := &BatchResult{Results: make([]BatchItem, 0, len(models))}
+	c := getOrInitConverter[M, P]()
+
+	for i, m := range models {
+		item := BatchItem{Index: i}
+		p := new(P)
+		if err := c.ConvertModelToPB(m, p); err != nil {
+			item.Success = false
+			item.Error = err
+			result.FailureCount++
+		} else {
+			item.Success = true
+			item.Value = p
+			pbs[i] = p
+			result.SuccessCount++
+		}
+		result.Results = append(result.Results, item)
+	}
+
+	return pbs, result
+}
+
+// SafeFromPBs 安全批量将 PB 切片转换为 Model 切片，不因单个失败而中断
+func SafeFromPBs[P any, M any](pbs []*P) ([]*M, *BatchResult) {
+	models := make([]*M, len(pbs))
+	result := &BatchResult{Results: make([]BatchItem, 0, len(pbs))}
+	c := getOrInitConverter[M, P]()
+
+	for i, pb := range pbs {
+		item := BatchItem{Index: i}
+		m := new(M)
+		if err := c.ConvertPBToModel(pb, m); err != nil {
+			item.Success = false
+			item.Error = err
+			result.FailureCount++
+		} else {
+			item.Success = true
+			item.Value = m
+			models[i] = m
+			result.SuccessCount++
+		}
+		result.Results = append(result.Results, item)
+	}
+
+	return models, result
+}
+
 // ConverterFor 获取已注册的转换器
 func ConverterFor[M any, P any]() *BidiConverter {
 	return getOrInitConverter[M, P]()
