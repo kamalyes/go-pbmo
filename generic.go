@@ -55,19 +55,26 @@ func RegisterWith[M any, P any](opts ...Option) *BidiConverter {
 	return c
 }
 
-// ToPB 将 Model 转换为 PB 消息
+// ToPB 将 Model 转换为 PB 消息，nil 输入返回 nil
 func ToPB[M any, P any](m *M) (*P, error) {
+	if m == nil {
+		return nil, nil
+	}
 	info := new(P)
 	return info, getOrInitConverter[M, P]().ConvertModelToPB(m, info)
 }
 
-// FromPB 将 PB 消息转换为 Model
+// FromPB 将 PB 消息转换为 Model，nil 输入返回 nil
 func FromPB[P any, M any](pb *P) (*M, error) {
+	if pb == nil {
+		return nil, nil
+	}
 	model := new(M)
 	return model, getOrInitConverter[M, P]().ConvertPBToModel(pb, model)
 }
 
 // ToPBs 批量将 Model 切片转换为 PB 切片
+// nil 元素转换为对应零值 PB，不返回错误
 func ToPBs[M any, P any](models []*M) ([]*P, error) {
 	pbs := make([]*P, len(models))
 	c := getOrInitConverter[M, P]()
@@ -82,6 +89,7 @@ func ToPBs[M any, P any](models []*M) ([]*P, error) {
 }
 
 // FromPBs 批量将 PB 切片转换为 Model 切片
+// nil 元素转换为对应零值 Model，不返回错误
 func FromPBs[P any, M any](pbs []*P) ([]*M, error) {
 	models := make([]*M, len(pbs))
 	c := getOrInitConverter[M, P]()
@@ -96,6 +104,7 @@ func FromPBs[P any, M any](pbs []*P) ([]*M, error) {
 }
 
 // SafeToPBs 安全批量将 Model 切片转换为 PB 切片，不因单个失败而中断
+// nil 元素标记为失败，输出对应位置保持 nil
 func SafeToPBs[M any, P any](models []*M) ([]*P, *BatchResult) {
 	pbs := make([]*P, len(models))
 	result := &BatchResult{Results: make([]BatchItem, 0, len(models))}
@@ -103,6 +112,13 @@ func SafeToPBs[M any, P any](models []*M) ([]*P, *BatchResult) {
 
 	for i, m := range models {
 		item := BatchItem{Index: i}
+		if m == nil {
+			item.Success = false
+			item.Error = NewConversionError("元素 %d: 输入为 nil", i)
+			result.FailureCount++
+			result.Results = append(result.Results, item)
+			continue
+		}
 		p := new(P)
 		if err := c.ConvertModelToPB(m, p); err != nil {
 			item.Success = false
@@ -121,6 +137,7 @@ func SafeToPBs[M any, P any](models []*M) ([]*P, *BatchResult) {
 }
 
 // SafeFromPBs 安全批量将 PB 切片转换为 Model 切片，不因单个失败而中断
+// nil 元素标记为失败，输出对应位置保持 nil
 func SafeFromPBs[P any, M any](pbs []*P) ([]*M, *BatchResult) {
 	models := make([]*M, len(pbs))
 	result := &BatchResult{Results: make([]BatchItem, 0, len(pbs))}
@@ -128,6 +145,13 @@ func SafeFromPBs[P any, M any](pbs []*P) ([]*M, *BatchResult) {
 
 	for i, pb := range pbs {
 		item := BatchItem{Index: i}
+		if pb == nil {
+			item.Success = false
+			item.Error = NewConversionError("元素 %d: 输入为 nil", i)
+			result.FailureCount++
+			result.Results = append(result.Results, item)
+			continue
+		}
 		m := new(M)
 		if err := c.ConvertPBToModel(pb, m); err != nil {
 			item.Success = false

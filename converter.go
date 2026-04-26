@@ -13,11 +13,12 @@
 package pbmo
 
 import (
-	"github.com/kamalyes/go-toolbox/pkg/syncx"
-	"google.golang.org/protobuf/types/known/timestamppb"
 	"reflect"
 	"sync"
 	"time"
+
+	"github.com/kamalyes/go-toolbox/pkg/syncx"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 // Converter 核心转换器接口
@@ -176,11 +177,8 @@ func (bc *BidiConverter) ConvertPBToModel(pb interface{}, modelPtr interface{}) 
 	bc.loadTagMappings()
 	bc.buildReverseMapping()
 
-	if pb == nil {
-		return ErrPBMessageNil
-	}
-	if modelPtr == nil {
-		return ErrModelNil
+	if pb == nil || modelPtr == nil {
+		return nil
 	}
 
 	modelVal := reflect.ValueOf(modelPtr)
@@ -188,7 +186,7 @@ func (bc *BidiConverter) ConvertPBToModel(pb interface{}, modelPtr interface{}) 
 		return ErrMustBePointer
 	}
 	if modelVal.IsNil() {
-		return ErrModelNil
+		return nil
 	}
 
 	modelVal = modelVal.Elem()
@@ -204,7 +202,7 @@ func (bc *BidiConverter) ConvertPBToModel(pb interface{}, modelPtr interface{}) 
 	pbVal := reflect.ValueOf(pb)
 	if pbVal.Kind() == reflect.Ptr {
 		if pbVal.IsNil() {
-			return ErrPBMessageNil
+			return nil
 		}
 		pbVal = pbVal.Elem()
 	}
@@ -247,11 +245,8 @@ func (bc *BidiConverter) ConvertPBToModel(pb interface{}, modelPtr interface{}) 
 func (bc *BidiConverter) ConvertModelToPB(model interface{}, pbPtr interface{}) error {
 	bc.loadTagMappings()
 
-	if model == nil {
-		return ErrModelNil
-	}
-	if pbPtr == nil {
-		return ErrPBMessageNil
+	if model == nil || pbPtr == nil {
+		return nil
 	}
 
 	pbVal := reflect.ValueOf(pbPtr)
@@ -259,7 +254,7 @@ func (bc *BidiConverter) ConvertModelToPB(model interface{}, pbPtr interface{}) 
 		return ErrMustBePointer
 	}
 	if pbVal.IsNil() {
-		return ErrPBMessageNil
+		return nil
 	}
 
 	pbVal = pbVal.Elem()
@@ -267,7 +262,7 @@ func (bc *BidiConverter) ConvertModelToPB(model interface{}, pbPtr interface{}) 
 	modelVal := reflect.ValueOf(model)
 	if modelVal.Kind() == reflect.Ptr {
 		if modelVal.IsNil() {
-			return ErrModelNil
+			return nil
 		}
 		modelVal = modelVal.Elem()
 	}
@@ -360,16 +355,45 @@ func convertField(src, dst reflect.Value, autoTime bool) error {
 		return nil
 	}
 
-	// 时间戳转换
+	// 时间戳转换：time.Time / *time.Time ↔ *timestamppb.Timestamp
+	// 仅在 autoTime 开启时生效，支持以下四种转换路径：
 	if autoTime {
+		// time.Time → *timestamppb.Timestamp（值类型时间 → PB 时间戳指针）
 		if srcType == timeType && dstType == timestampPtrType {
 			t := src.Interface().(time.Time)
 			dst.Set(reflect.ValueOf(timestamppb.New(t)))
 			return nil
 		}
+		// *timestamppb.Timestamp → time.Time（PB 时间戳指针 → 值类型时间）
 		if srcType == timestampPtrType && dstType == timeType {
 			return convertTimestampToTime(src, dst)
 		}
+		// *time.Time → *timestamppb.Timestamp（时间指针 → PB 时间戳指针）
+		// 当源值为 nil 时直接返回，目标保持零值
+		if srcType == timePtrType && dstType == timestampPtrType {
+			if src.IsNil() {
+				return nil
+			}
+			t := src.Interface().(*time.Time)
+			dst.Set(reflect.ValueOf(timestamppb.New(*t)))
+			return nil
+		}
+		// *timestamppb.Timestamp → *time.Time（PB 时间戳指针 → 时间指针）
+		// 当源值为 nil 时直接返回，目标保持零值
+		if srcType == timestampPtrType && dstType == timePtrType {
+			if src.IsNil() {
+				return nil
+			}
+			ts := src.Interface().(*timestamppb.Timestamp)
+			t := ts.AsTime()
+			dst.Set(reflect.ValueOf(&t))
+			return nil
+		}
+	}
+
+	// Wrappers 类型自动转换: *T ↔ *wrapperspb.XxxValue
+	if handled, err := tryConvertWrapper(src, dst); handled {
+		return err
 	}
 
 	// 整数类型转换

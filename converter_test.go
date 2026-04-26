@@ -12,9 +12,10 @@
 package pbmo
 
 import (
-	"github.com/stretchr/testify/assert"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
 )
 
 func TestNewBidiConverter(t *testing.T) {
@@ -93,7 +94,7 @@ func TestConvertPBToModel_NilPB(t *testing.T) {
 	var model TestSimpleModel
 
 	err := bc.ConvertPBToModel(nil, &model)
-	assert.Error(t, err)
+	assert.Empty(t, err)
 }
 
 func TestConvertPBToModel_NilModel(t *testing.T) {
@@ -101,7 +102,7 @@ func TestConvertPBToModel_NilModel(t *testing.T) {
 	pb := TestSimplePB{Value: "test"}
 
 	err := bc.ConvertPBToModel(pb, nil)
-	assert.Error(t, err)
+	assert.Empty(t, err)
 }
 
 func TestConvertPBToModel_NonPointerModel(t *testing.T) {
@@ -118,7 +119,7 @@ func TestConvertModelToPB_NilModel(t *testing.T) {
 	var pb TestSimplePB
 
 	err := bc.ConvertModelToPB(nil, &pb)
-	assert.Error(t, err)
+	assert.Empty(t, err)
 }
 
 func TestConvertModelToPB_NilPB(t *testing.T) {
@@ -126,7 +127,7 @@ func TestConvertModelToPB_NilPB(t *testing.T) {
 	model := TestSimpleModel{Value: "test"}
 
 	err := bc.ConvertModelToPB(model, nil)
-	assert.Error(t, err)
+	assert.Empty(t, err)
 }
 
 func TestConvertPBToModel_WithTransformer(t *testing.T) {

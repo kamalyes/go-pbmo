@@ -274,8 +274,10 @@ func TestToPBs_NilElement(t *testing.T) {
 		{Value: "third", Count: 3},
 	}
 
-	_, err := ToPBs[TestSimpleModel, TestSimplePB](models)
-	assert.Error(t, err)
+	pbModels, err := ToPBs[TestSimpleModel, TestSimplePB](models)
+	assert.NotEmpty(t, pbModels)
+	assert.Len(t, pbModels, len(models))
+	assert.Empty(t, err)
 }
 
 func TestFromPBs_NilElement(t *testing.T) {
@@ -285,8 +287,10 @@ func TestFromPBs_NilElement(t *testing.T) {
 		{Value: "third", Count: 3},
 	}
 
-	_, err := FromPBs[TestSimplePB, TestSimpleModel](pbs)
-	assert.Error(t, err)
+	modelPbs, err := FromPBs[TestSimplePB, TestSimpleModel](pbs)
+	assert.NotEmpty(t, modelPbs)
+	assert.Len(t, modelPbs, len(pbs))
+	assert.NoError(t, err)
 }
 
 func TestToPBs_LargeSlice(t *testing.T) {
@@ -702,7 +706,7 @@ func TestSafeToPBsAndSafeFromPBs_RoundTrip(t *testing.T) {
 	}
 }
 
-func TestToPBs_WithNilElement_StopsAtError(t *testing.T) {
+func TestToPBs_WithNilElement_SkipsNil(t *testing.T) {
 	models := []*TestSimpleModel{
 		{Value: "before_nil", Count: 1},
 		nil,
@@ -710,11 +714,14 @@ func TestToPBs_WithNilElement_StopsAtError(t *testing.T) {
 	}
 
 	pbs, err := ToPBs[TestSimpleModel, TestSimplePB](models)
-	assert.Error(t, err)
-	assert.Nil(t, pbs)
+	assert.NoError(t, err)
+	assert.Len(t, pbs, 3)
+	assert.Equal(t, "before_nil", pbs[0].Value)
+	assert.Equal(t, "", pbs[1].Value)
+	assert.Equal(t, "after_nil", pbs[2].Value)
 }
 
-func TestFromPBs_WithNilElement_StopsAtError(t *testing.T) {
+func TestFromPBs_WithNilElement_SkipsNil(t *testing.T) {
 	pbs := []*TestSimplePB{
 		{Value: "before_nil", Count: 1},
 		nil,
@@ -722,8 +729,11 @@ func TestFromPBs_WithNilElement_StopsAtError(t *testing.T) {
 	}
 
 	models, err := FromPBs[TestSimplePB, TestSimpleModel](pbs)
-	assert.Error(t, err)
-	assert.Nil(t, models)
+	assert.NoError(t, err)
+	assert.Len(t, models, 3)
+	assert.Equal(t, "before_nil", models[0].Value)
+	assert.Equal(t, "", models[1].Value)
+	assert.Equal(t, "after_nil", models[2].Value)
 }
 
 func TestToPBs_DifferentTypePairs(t *testing.T) {
@@ -777,9 +787,10 @@ func TestSafeToPBs_MultipleNilElements(t *testing.T) {
 	assert.Equal(t, 2, result.SuccessCount)
 	assert.Equal(t, 3, result.FailureCount)
 	assert.Len(t, pbs, 5)
-	assert.NotNil(t, pbs[1])
+	assert.Nil(t, pbs[0])
 	assert.Equal(t, "middle", pbs[1].Value)
-	assert.NotNil(t, pbs[4])
+	assert.Nil(t, pbs[2])
+	assert.Nil(t, pbs[3])
 	assert.Equal(t, "end", pbs[4].Value)
 }
 
@@ -795,9 +806,9 @@ func TestSafeFromPBs_MultipleNilElements(t *testing.T) {
 	assert.Equal(t, 2, result.SuccessCount)
 	assert.Equal(t, 2, result.FailureCount)
 	assert.Len(t, models, 4)
-	assert.NotNil(t, models[1])
+	assert.Nil(t, models[0])
 	assert.Equal(t, "v2", models[1].Value)
-	assert.NotNil(t, models[3])
+	assert.Nil(t, models[2])
 	assert.Equal(t, "v4", models[3].Value)
 }
 

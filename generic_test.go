@@ -77,11 +77,13 @@ func TestGenericConverterFor(t *testing.T) {
 }
 
 func TestGenericToPBNilModel(t *testing.T) {
-	_, err := ToPB[TestModel, TestPB](nil)
-	assert.Error(t, err)
+	result, err := ToPB[TestModel, TestPB](nil)
+	assert.NoError(t, err)
+	assert.Nil(t, result)
 }
 
 func TestGenericFromPBNilPB(t *testing.T) {
-	_, err := FromPB[TestPB, TestModel](nil)
-	assert.Error(t, err)
+	result, err := FromPB[TestPB, TestModel](nil)
+	assert.NoError(t, err)
+	assert.Nil(t, result)
 }
