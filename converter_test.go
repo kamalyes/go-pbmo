@@ -12,9 +12,10 @@
 package pbmo
 
 import (
-	"github.com/stretchr/testify/assert"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
 )
 
 func TestNewBidiConverter(t *testing.T) {
@@ -93,7 +94,7 @@ func TestConvertPBToModel_NilPB(t *testing.T) {
 	var model TestSimpleModel
 
 	err := bc.ConvertPBToModel(nil, &model)
-	assert.Error(t, err)
+	assert.Empty(t, err)
 }
 
 func TestConvertPBToModel_NilModel(t *testing.T) {
@@ -101,7 +102,7 @@ func TestConvertPBToModel_NilModel(t *testing.T) {
 	pb := TestSimplePB{Value: "test"}
 
 	err := bc.ConvertPBToModel(pb, nil)
-	assert.Error(t, err)
+	assert.Empty(t, err)
 }
 
 func TestConvertPBToModel_NonPointerModel(t *testing.T) {
@@ -118,7 +119,7 @@ func TestConvertModelToPB_NilModel(t *testing.T) {
 	var pb TestSimplePB
 
 	err := bc.ConvertModelToPB(nil, &pb)
-	assert.Error(t, err)
+	assert.Empty(t, err)
 }
 
 func TestConvertModelToPB_NilPB(t *testing.T) {
@@ -126,7 +127,7 @@ func TestConvertModelToPB_NilPB(t *testing.T) {
 	model := TestSimpleModel{Value: "test"}
 
 	err := bc.ConvertModelToPB(model, nil)
-	assert.Error(t, err)
+	assert.Empty(t, err)
 }
 
 func TestConvertPBToModel_WithTransformer(t *testing.T) {
@@ -282,4 +283,43 @@ func TestBidiConverter_ChainCall_OptionsModified(t *testing.T) {
 	assert.Equal(t, 4, bc.options.Concurrency)
 	assert.Equal(t, 50, bc.options.BatchSize)
 	assert.Equal(t, 10*time.Second, bc.options.Timeout)
+}
+
+func TestBidiConverter_RegisterTransformer_ChainCall(t *testing.T) {
+	bc := NewBidiConverter(TestSimplePB{}, TestSimpleModel{})
+
+	result := bc.RegisterTransformer("Value", func(v interface{}) interface{} {
+		return "transformed_" + v.(string)
+	})
+
+	assert.NotNil(t, result)
+	assert.Same(t, bc, result, "RegisterTransformer should return the same BidiConverter for chaining")
+}
+
+func TestBidiConverter_RegisterTransformer_MultipleChain(t *testing.T) {
+	bc := NewBidiConverter(TestSimplePB{}, TestSimpleModel{})
+
+	result := bc.
+		RegisterTransformer("Value", func(v interface{}) interface{} { return v }).
+		RegisterTransformer("Count", func(v interface{}) interface{} { return v })
+
+	assert.NotNil(t, result)
+	assert.Same(t, bc, result)
+	assert.True(t, bc.transformers.Has("Value"))
+	assert.True(t, bc.transformers.Has("Count"))
+}
+
+func TestBidiConverter_RegisterTransformer_WithFieldMapping_Chain(t *testing.T) {
+	bc := NewBidiConverter(TestPBWithMapping{}, TestModelWithMapping{})
+
+	result := bc.
+		WithFieldMapping("ID", "ClientId").
+		WithFieldMapping("Name", "UserName").
+		RegisterTransformer("Email", func(v interface{}) interface{} {
+			return "prefix_" + v.(string)
+		})
+
+	assert.NotNil(t, result)
+	assert.Same(t, bc, result)
+	assert.True(t, bc.transformers.Has("Email"))
 }

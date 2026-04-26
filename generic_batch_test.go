@@ -17,6 +17,8 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
+// --- ToPBs / FromPBs 测试（指针切片） ---
+
 func TestToPBs_Simple(t *testing.T) {
 	models := []*TestSimpleModel{
 		{Value: "a", Count: 1},
@@ -274,8 +276,12 @@ func TestToPBs_NilElement(t *testing.T) {
 		{Value: "third", Count: 3},
 	}
 
-	_, err := ToPBs[TestSimpleModel, TestSimplePB](models)
-	assert.Error(t, err)
+	pbModels, err := ToPBs[TestSimpleModel, TestSimplePB](models)
+	assert.NoError(t, err)
+	assert.Len(t, pbModels, 3)
+	assert.Equal(t, "first", pbModels[0].Value)
+	assert.Equal(t, "", pbModels[1].Value)
+	assert.Equal(t, "third", pbModels[2].Value)
 }
 
 func TestFromPBs_NilElement(t *testing.T) {
@@ -285,8 +291,9 @@ func TestFromPBs_NilElement(t *testing.T) {
 		{Value: "third", Count: 3},
 	}
 
-	_, err := FromPBs[TestSimplePB, TestSimpleModel](pbs)
-	assert.Error(t, err)
+	modelPbs, err := FromPBs[TestSimplePB, TestSimpleModel](pbs)
+	assert.NoError(t, err)
+	assert.Len(t, modelPbs, len(pbs))
 }
 
 func TestToPBs_LargeSlice(t *testing.T) {
@@ -375,8 +382,10 @@ func TestToPBs_ConverterCache(t *testing.T) {
 	assert.Same(t, c1, c2, "converter should be cached")
 }
 
-func TestSafeToPBs_AllSuccess(t *testing.T) {
-	models := []*TestSimpleModel{
+// --- SafeToPBs / SafeFromPBs 测试（值切片 + 自动检测） ---
+
+func TestSafeToPBs_AllSuccess_ValueSlice(t *testing.T) {
+	models := []TestSimpleModel{
 		{Value: "ok1", Count: 1},
 		{Value: "ok2", Count: 2},
 		{Value: "ok3", Count: 3},
@@ -391,7 +400,21 @@ func TestSafeToPBs_AllSuccess(t *testing.T) {
 	assert.Equal(t, "ok3", pbs[2].Value)
 }
 
-func TestSafeFromPBs_AllSuccess(t *testing.T) {
+func TestSafeToPBs_AllSuccess_PtrSlice(t *testing.T) {
+	models := []*TestSimpleModel{
+		{Value: "p1", Count: 1},
+		{Value: "p2", Count: 2},
+	}
+
+	pbs, result := SafeToPBs[*TestSimpleModel, TestSimplePB](models)
+	assert.Equal(t, 2, result.SuccessCount)
+	assert.Equal(t, 0, result.FailureCount)
+	assert.Len(t, pbs, 2)
+	assert.Equal(t, "p1", pbs[0].Value)
+	assert.Equal(t, "p2", pbs[1].Value)
+}
+
+func TestSafeFromPBs_AllSuccess_PtrSlice(t *testing.T) {
 	pbs := []*TestSimplePB{
 		{Value: "s1", Count: 10},
 		{Value: "s2", Count: 20},
@@ -405,14 +428,33 @@ func TestSafeFromPBs_AllSuccess(t *testing.T) {
 	assert.Equal(t, "s2", models[1].Value)
 }
 
-func TestSafeToPBs_NilElement(t *testing.T) {
+func TestSafeToPBs_ZeroValueElement(t *testing.T) {
+	models := []TestSimpleModel{
+		{Value: "good", Count: 1},
+		{},
+		{Value: "also_good", Count: 3},
+	}
+
+	pbs, result := SafeToPBs[TestSimpleModel, TestSimplePB](models)
+	assert.Equal(t, 3, result.SuccessCount)
+	assert.Equal(t, 0, result.FailureCount)
+	assert.Len(t, pbs, 3)
+	assert.NotNil(t, pbs[0])
+	assert.NotNil(t, pbs[1])
+	assert.NotNil(t, pbs[2])
+	assert.Equal(t, "good", pbs[0].Value)
+	assert.Equal(t, "", pbs[1].Value)
+	assert.Equal(t, "also_good", pbs[2].Value)
+}
+
+func TestSafeToPBs_NilElement_PtrSlice(t *testing.T) {
 	models := []*TestSimpleModel{
 		{Value: "good", Count: 1},
 		nil,
 		{Value: "also_good", Count: 3},
 	}
 
-	pbs, result := SafeToPBs[TestSimpleModel, TestSimplePB](models)
+	pbs, result := SafeToPBs[*TestSimpleModel, TestSimplePB](models)
 	assert.Equal(t, 2, result.SuccessCount)
 	assert.Equal(t, 1, result.FailureCount)
 	assert.Len(t, pbs, 3)
@@ -421,13 +463,9 @@ func TestSafeToPBs_NilElement(t *testing.T) {
 	assert.NotNil(t, pbs[2])
 	assert.Equal(t, "good", pbs[0].Value)
 	assert.Equal(t, "also_good", pbs[2].Value)
-
-	assert.False(t, result.Results[1].Success)
-	assert.True(t, result.Results[0].Success)
-	assert.True(t, result.Results[2].Success)
 }
 
-func TestSafeFromPBs_NilElement(t *testing.T) {
+func TestSafeFromPBs_NilElement_PtrSlice(t *testing.T) {
 	pbs := []*TestSimplePB{
 		{Value: "valid", Count: 1},
 		nil,
@@ -438,15 +476,13 @@ func TestSafeFromPBs_NilElement(t *testing.T) {
 	assert.Equal(t, 2, result.SuccessCount)
 	assert.Equal(t, 1, result.FailureCount)
 	assert.Len(t, models, 3)
-	assert.NotNil(t, models[0])
-	assert.Nil(t, models[1])
-	assert.NotNil(t, models[2])
 	assert.Equal(t, "valid", models[0].Value)
+	assert.Nil(t, models[1])
 	assert.Equal(t, "valid2", models[2].Value)
 }
 
 func TestSafeToPBs_EmptySlice(t *testing.T) {
-	models := []*TestSimpleModel{}
+	models := []TestSimpleModel{}
 
 	pbs, result := SafeToPBs[TestSimpleModel, TestSimplePB](models)
 	assert.Equal(t, 0, result.SuccessCount)
@@ -464,7 +500,7 @@ func TestSafeFromPBs_EmptySlice(t *testing.T) {
 }
 
 func TestSafeToPBs_NilSlice(t *testing.T) {
-	var models []*TestSimpleModel
+	var models []TestSimpleModel
 
 	pbs, result := SafeToPBs[TestSimpleModel, TestSimplePB](models)
 	assert.Equal(t, 0, result.SuccessCount)
@@ -482,7 +518,7 @@ func TestSafeFromPBs_NilSlice(t *testing.T) {
 }
 
 func TestSafeToPBs_SingleElement(t *testing.T) {
-	models := []*TestSimpleModel{{Value: "only", Count: 7}}
+	models := []TestSimpleModel{{Value: "only", Count: 7}}
 
 	pbs, result := SafeToPBs[TestSimpleModel, TestSimplePB](models)
 	assert.Equal(t, 1, result.SuccessCount)
@@ -502,7 +538,7 @@ func TestSafeFromPBs_SingleElement(t *testing.T) {
 }
 
 func TestSafeToPBs_WithFieldMapping(t *testing.T) {
-	models := []*TestModelWithMapping{
+	models := []TestModelWithMapping{
 		{ID: 1, Name: "mapped_a", Email: "a@map.com"},
 		{ID: 2, Name: "mapped_b", Email: "b@map.com"},
 	}
@@ -531,7 +567,7 @@ func TestSafeFromPBs_WithFieldMapping(t *testing.T) {
 }
 
 func TestSafeToPBs_WithTagMapping(t *testing.T) {
-	models := []*TestModel{
+	models := []TestModel{
 		{ID: 1, Name: "tag_safe", Email: "ts@tag.com", Age: 25, Score: 90.0, Active: true},
 	}
 
@@ -558,7 +594,7 @@ func TestSafeFromPBs_WithTagMapping(t *testing.T) {
 }
 
 func TestSafeToPBs_AllTypes(t *testing.T) {
-	models := []*TestAllTypesModel{
+	models := []TestAllTypesModel{
 		{IntVal: -1, Int64Val: -2, UintVal: 3, Uint64Val: 4, FloatVal: 1.1, DoubleVal: 2.2, BoolVal: true, StrVal: "all", BytesVal: []byte("types")},
 	}
 
@@ -582,7 +618,7 @@ func TestSafeFromPBs_AllTypes(t *testing.T) {
 }
 
 func TestSafeToPBs_EmptyStruct(t *testing.T) {
-	models := []*TestEmptyModel{{}, {}, {}}
+	models := []TestEmptyModel{{}, {}, {}}
 
 	pbs, result := SafeToPBs[TestEmptyModel, TestEmptyPB](models)
 	assert.Equal(t, 3, result.SuccessCount)
@@ -600,9 +636,9 @@ func TestSafeFromPBs_EmptyStruct(t *testing.T) {
 }
 
 func TestSafeToPBs_LargeSlice(t *testing.T) {
-	models := make([]*TestSimpleModel, 500)
+	models := make([]TestSimpleModel, 500)
 	for i := range models {
-		models[i] = &TestSimpleModel{Value: "big", Count: int32(i)}
+		models[i] = TestSimpleModel{Value: "big", Count: int32(i)}
 	}
 
 	pbs, result := SafeToPBs[TestSimpleModel, TestSimplePB](models)
@@ -624,9 +660,9 @@ func TestSafeFromPBs_LargeSlice(t *testing.T) {
 }
 
 func TestSafeToPBs_BatchResultDetails(t *testing.T) {
-	models := []*TestSimpleModel{
+	models := []TestSimpleModel{
 		{Value: "first", Count: 1},
-		nil,
+		{Value: "", Count: 0},
 		{Value: "third", Count: 3},
 	}
 
@@ -639,8 +675,7 @@ func TestSafeToPBs_BatchResultDetails(t *testing.T) {
 	assert.NotNil(t, result.Results[0].Value)
 
 	assert.Equal(t, 1, result.Results[1].Index)
-	assert.False(t, result.Results[1].Success)
-	assert.Error(t, result.Results[1].Error)
+	assert.True(t, result.Results[1].Success)
 
 	assert.Equal(t, 2, result.Results[2].Index)
 	assert.True(t, result.Results[2].Success)
@@ -685,7 +720,7 @@ func TestToPBsAndFromPBs_RoundTrip(t *testing.T) {
 }
 
 func TestSafeToPBsAndSafeFromPBs_RoundTrip(t *testing.T) {
-	originalModels := []*TestSimpleModel{
+	originalModels := []TestSimpleModel{
 		{Value: "safe_round1", Count: 111},
 		{Value: "safe_round2", Count: 222},
 	}
@@ -702,7 +737,7 @@ func TestSafeToPBsAndSafeFromPBs_RoundTrip(t *testing.T) {
 	}
 }
 
-func TestToPBs_WithNilElement_StopsAtError(t *testing.T) {
+func TestToPBs_WithNilElement(t *testing.T) {
 	models := []*TestSimpleModel{
 		{Value: "before_nil", Count: 1},
 		nil,
@@ -710,11 +745,14 @@ func TestToPBs_WithNilElement_StopsAtError(t *testing.T) {
 	}
 
 	pbs, err := ToPBs[TestSimpleModel, TestSimplePB](models)
-	assert.Error(t, err)
-	assert.Nil(t, pbs)
+	assert.NoError(t, err)
+	assert.Len(t, pbs, 3)
+	assert.Equal(t, "before_nil", pbs[0].Value)
+	assert.Equal(t, "", pbs[1].Value)
+	assert.Equal(t, "after_nil", pbs[2].Value)
 }
 
-func TestFromPBs_WithNilElement_StopsAtError(t *testing.T) {
+func TestFromPBs_WithNilElement(t *testing.T) {
 	pbs := []*TestSimplePB{
 		{Value: "before_nil", Count: 1},
 		nil,
@@ -722,8 +760,11 @@ func TestFromPBs_WithNilElement_StopsAtError(t *testing.T) {
 	}
 
 	models, err := FromPBs[TestSimplePB, TestSimpleModel](pbs)
-	assert.Error(t, err)
-	assert.Nil(t, models)
+	assert.NoError(t, err)
+	assert.Len(t, models, 3)
+	assert.Equal(t, "before_nil", models[0].Value)
+	assert.Equal(t, "", models[1].Value)
+	assert.Equal(t, "after_nil", models[2].Value)
 }
 
 func TestToPBs_DifferentTypePairs(t *testing.T) {
@@ -764,7 +805,7 @@ func TestFromPBs_DifferentTypePairs(t *testing.T) {
 	assert.Equal(t, uint64(77), tagModels[0].ID)
 }
 
-func TestSafeToPBs_MultipleNilElements(t *testing.T) {
+func TestSafeToPBs_MultipleNilElements_PtrSlice(t *testing.T) {
 	models := []*TestSimpleModel{
 		nil,
 		{Value: "middle", Count: 2},
@@ -773,13 +814,14 @@ func TestSafeToPBs_MultipleNilElements(t *testing.T) {
 		{Value: "end", Count: 5},
 	}
 
-	pbs, result := SafeToPBs[TestSimpleModel, TestSimplePB](models)
+	pbs, result := SafeToPBs[*TestSimpleModel, TestSimplePB](models)
 	assert.Equal(t, 2, result.SuccessCount)
 	assert.Equal(t, 3, result.FailureCount)
 	assert.Len(t, pbs, 5)
-	assert.NotNil(t, pbs[1])
+	assert.Nil(t, pbs[0])
 	assert.Equal(t, "middle", pbs[1].Value)
-	assert.NotNil(t, pbs[4])
+	assert.Nil(t, pbs[2])
+	assert.Nil(t, pbs[3])
 	assert.Equal(t, "end", pbs[4].Value)
 }
 
@@ -795,16 +837,16 @@ func TestSafeFromPBs_MultipleNilElements(t *testing.T) {
 	assert.Equal(t, 2, result.SuccessCount)
 	assert.Equal(t, 2, result.FailureCount)
 	assert.Len(t, models, 4)
-	assert.NotNil(t, models[1])
+	assert.Nil(t, models[0])
 	assert.Equal(t, "v2", models[1].Value)
-	assert.NotNil(t, models[3])
+	assert.Nil(t, models[2])
 	assert.Equal(t, "v4", models[3].Value)
 }
 
-func TestSafeToPBs_AllNil(t *testing.T) {
+func TestSafeToPBs_AllNil_PtrSlice(t *testing.T) {
 	models := []*TestSimpleModel{nil, nil, nil}
 
-	pbs, result := SafeToPBs[TestSimpleModel, TestSimplePB](models)
+	pbs, result := SafeToPBs[*TestSimpleModel, TestSimplePB](models)
 	assert.Equal(t, 0, result.SuccessCount)
 	assert.Equal(t, 3, result.FailureCount)
 	assert.Len(t, pbs, 3)

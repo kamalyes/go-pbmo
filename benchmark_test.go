@@ -14,7 +14,9 @@ package pbmo
 import (
 	"fmt"
 	"reflect"
+	"sync"
 	"testing"
+	"time"
 )
 
 // BenchmarkConvertPBToModel_Simple 基准测试简单 PB -> Model 转换
@@ -380,4 +382,132 @@ func BenchmarkSafeBatchConvertPBToModel(b *testing.B) {
 // reflectValueOf 辅助函数，避免在 benchmark 中重复创建 reflect.Value
 func reflectValueOf(v interface{}) reflect.Value {
 	return reflect.ValueOf(v)
+}
+
+// BenchmarkNamedSliceConversion 命名切片类型自动转换（ConvertibleTo 快速路径）
+func BenchmarkNamedSliceConversion_ModelToPB(b *testing.B) {
+	Register[TestNamedSliceModel, TestNamedSlicePB]()
+	model := &TestNamedSliceModel{
+		Name:  "bench",
+		Tags:  TestStringSlice{"a", "b", "c", "d", "e"},
+		Items: TestStringSlice{"1", "2", "3"},
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_, _ = ToPB[TestNamedSliceModel, TestNamedSlicePB](model)
+	}
+}
+
+// BenchmarkNamedSliceConversion_PBToModel 命名切片反向转换
+func BenchmarkNamedSliceConversion_PBToModel(b *testing.B) {
+	Register[TestNamedSliceModel, TestNamedSlicePB]()
+	pb := &TestNamedSlicePB{
+		Name:  "bench",
+		Tags:  []string{"a", "b", "c", "d", "e"},
+		Items: []string{"1", "2", "3"},
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_, _ = FromPB[TestNamedSlicePB, TestNamedSliceModel](pb)
+	}
+}
+
+// BenchmarkNestedStructAutoConversion 嵌套结构体自动转换
+func BenchmarkNestedStructAutoConversion_ModelToPB(b *testing.B) {
+	Register[TestInnerModel, TestInnerPB]()
+	Register[TestNestedAutoModel, TestNestedAutoPB]()
+	model := &TestNestedAutoModel{
+		Name: "bench-nested",
+		Inner: &TestInnerModel{
+			Label: "inner-label",
+			Count: 42,
+		},
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_, _ = ToPB[TestNestedAutoModel, TestNestedAutoPB](model)
+	}
+}
+
+// BenchmarkTimePtrAutoConversion 时间指针自动转换
+func BenchmarkTimePtrAutoConversion_ModelToPB(b *testing.B) {
+	Register[TestTimePtrModel, TestTimePtrPB]()
+	scheduled := time.Date(2026, 5, 1, 10, 0, 0, 0, time.UTC)
+	model := &TestTimePtrModel{
+		Name:        "bench-time",
+		ScheduledAt: &scheduled,
+		ReleasedAt:  nil,
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_, _ = ToPB[TestTimePtrModel, TestTimePtrPB](model)
+	}
+}
+
+// BenchmarkWrapperFieldAutoConversion Wrapper 字段自动转换
+func BenchmarkWrapperFieldAutoConversion_ModelToPB(b *testing.B) {
+	Register[TestWrapperFieldModel, TestWrapperFieldPB]()
+	minVal := int32(10)
+	maxVal := int32(100)
+	model := &TestWrapperFieldModel{
+		Name:   "bench-wrapper",
+		MinVal: &minVal,
+		MaxVal: &maxVal,
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_, _ = ToPB[TestWrapperFieldModel, TestWrapperFieldPB](model)
+	}
+}
+
+// BenchmarkFindConverter_Cached findConverter 缓存命中
+func BenchmarkFindConverter_Cached(b *testing.B) {
+	Register[TestSimpleModel, TestSimplePB]()
+	srcType := reflect.TypeOf((*TestSimpleModel)(nil)).Elem()
+	dstType := reflect.TypeOf((*TestSimplePB)(nil)).Elem()
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		findConverter(srcType, dstType)
+	}
+}
+
+// BenchmarkFindConverter_Uncached findConverter 首次查找
+func BenchmarkFindConverter_Uncached(b *testing.B) {
+	srcType := reflect.TypeOf((*TestSimpleModel)(nil)).Elem()
+	dstType := reflect.TypeOf((*TestSimplePB)(nil)).Elem()
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		converterLookupCache = sync.Map{}
+		findConverter(srcType, dstType)
+	}
+}
+
+// BenchmarkTimeZeroValue_ZeroTime 零值时间转换
+func BenchmarkTimeZeroValue_ZeroTime(b *testing.B) {
+	Register[TestTimeZeroModel, TestTimeZeroPB]()
+	model := &TestTimeZeroModel{
+		Name:      "zero",
+		CreatedAt: time.Time{},
+		UpdatedAt: time.Time{},
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_, _ = ToPB[TestTimeZeroModel, TestTimeZeroPB](model)
+	}
 }
