@@ -21,6 +21,7 @@ import (
 // 常用类型缓存，避免重复反射
 var (
 	timeType         = reflect.TypeOf(time.Time{})
+	timePtrType      = reflect.TypeOf((*time.Time)(nil))
 	timestampPtrType = reflect.TypeOf((*timestamppb.Timestamp)(nil))
 )
 

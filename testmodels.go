@@ -11,6 +11,13 @@
 
 package pbmo
 
+import (
+	"time"
+
+	"google.golang.org/protobuf/types/known/timestamppb"
+	"google.golang.org/protobuf/types/known/wrapperspb"
+)
+
 // TestPB 测试用 PB 结构体
 type TestPB struct {
 	Id     uint64
@@ -111,4 +118,87 @@ type TestSingleFieldPB struct {
 // TestSingleFieldModel 单字段 Model
 type TestSingleFieldModel struct {
 	Name string
+}
+
+// TestNamedSlicePB 命名切片测试 PB（使用 []string）
+type TestNamedSlicePB struct {
+	Name  string
+	Tags  []string
+	Items []string
+}
+
+// TestStringSlice 命名字符串切片类型
+type TestStringSlice []string
+
+// TestNamedSliceModel 命名切片测试 Model（使用命名切片类型）
+type TestNamedSliceModel struct {
+	Name  string
+	Tags  TestStringSlice
+	Items TestStringSlice
+}
+
+// TestInnerPB 内嵌结构体 PB
+type TestInnerPB struct {
+	Label string
+	Count int32
+}
+
+// TestInnerModel 内嵌结构体 Model
+type TestInnerModel struct {
+	Label string
+	Count int32
+}
+
+// TestNestedAutoPB 嵌套自动转换 PB
+type TestNestedAutoPB struct {
+	Name  string
+	Inner *TestInnerPB
+}
+
+// TestNestedAutoModel 嵌套自动转换 Model
+type TestNestedAutoModel struct {
+	Name  string
+	Inner *TestInnerModel
+}
+
+// TestTimeZeroPB 时间零值测试 PB
+type TestTimeZeroPB struct {
+	Name      string
+	CreatedAt *timestamppb.Timestamp
+	UpdatedAt *timestamppb.Timestamp
+}
+
+// TestTimeZeroModel 时间零值测试 Model
+type TestTimeZeroModel struct {
+	Name      string
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
+// TestTimePtrPB 时间指针测试 PB
+type TestTimePtrPB struct {
+	Name        string
+	ScheduledAt *timestamppb.Timestamp
+	ReleasedAt  *timestamppb.Timestamp
+}
+
+// TestTimePtrModel 时间指针测试 Model
+type TestTimePtrModel struct {
+	Name        string
+	ScheduledAt *time.Time
+	ReleasedAt  *time.Time
+}
+
+// TestWrapperFieldPB Wrapper 字段测试 PB
+type TestWrapperFieldPB struct {
+	Name   string
+	MinVal *wrapperspb.Int32Value
+	MaxVal *wrapperspb.Int32Value
+}
+
+// TestWrapperFieldModel Wrapper 字段测试 Model
+type TestWrapperFieldModel struct {
+	Name   string
+	MinVal *int32
+	MaxVal *int32
 }

@@ -13,11 +13,12 @@
 package pbmo
 
 import (
-	"github.com/kamalyes/go-toolbox/pkg/syncx"
-	"google.golang.org/protobuf/types/known/timestamppb"
 	"reflect"
 	"sync"
 	"time"
+
+	"github.com/kamalyes/go-toolbox/pkg/syncx"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 // Converter 核心转换器接口
@@ -62,8 +63,9 @@ func NewBidiConverter(pbType, modelType interface{}, opts ...Option) *BidiConver
 }
 
 // RegisterTransformer 注册字段转换器
-func (bc *BidiConverter) RegisterTransformer(field string, fn TransformerFunc) {
+func (bc *BidiConverter) RegisterTransformer(field string, fn TransformerFunc) *BidiConverter {
 	bc.transformers.Register(field, fn)
+	return bc
 }
 
 // RegisterValidationRules 注册校验规则
@@ -176,11 +178,8 @@ func (bc *BidiConverter) ConvertPBToModel(pb interface{}, modelPtr interface{}) 
 	bc.loadTagMappings()
 	bc.buildReverseMapping()
 
-	if pb == nil {
-		return ErrPBMessageNil
-	}
-	if modelPtr == nil {
-		return ErrModelNil
+	if pb == nil || modelPtr == nil {
+		return nil
 	}
 
 	modelVal := reflect.ValueOf(modelPtr)
@@ -188,7 +187,7 @@ func (bc *BidiConverter) ConvertPBToModel(pb interface{}, modelPtr interface{}) 
 		return ErrMustBePointer
 	}
 	if modelVal.IsNil() {
-		return ErrModelNil
+		return nil
 	}
 
 	modelVal = modelVal.Elem()
@@ -204,7 +203,7 @@ func (bc *BidiConverter) ConvertPBToModel(pb interface{}, modelPtr interface{}) 
 	pbVal := reflect.ValueOf(pb)
 	if pbVal.Kind() == reflect.Ptr {
 		if pbVal.IsNil() {
-			return ErrPBMessageNil
+			return nil
 		}
 		pbVal = pbVal.Elem()
 	}
@@ -247,11 +246,8 @@ func (bc *BidiConverter) ConvertPBToModel(pb interface{}, modelPtr interface{}) 
 func (bc *BidiConverter) ConvertModelToPB(model interface{}, pbPtr interface{}) error {
 	bc.loadTagMappings()
 
-	if model == nil {
-		return ErrModelNil
-	}
-	if pbPtr == nil {
-		return ErrPBMessageNil
+	if model == nil || pbPtr == nil {
+		return nil
 	}
 
 	pbVal := reflect.ValueOf(pbPtr)
@@ -259,7 +255,7 @@ func (bc *BidiConverter) ConvertModelToPB(model interface{}, pbPtr interface{}) 
 		return ErrMustBePointer
 	}
 	if pbVal.IsNil() {
-		return ErrPBMessageNil
+		return nil
 	}
 
 	pbVal = pbVal.Elem()
@@ -267,7 +263,7 @@ func (bc *BidiConverter) ConvertModelToPB(model interface{}, pbPtr interface{}) 
 	modelVal := reflect.ValueOf(model)
 	if modelVal.Kind() == reflect.Ptr {
 		if modelVal.IsNil() {
-			return ErrModelNil
+			return nil
 		}
 		modelVal = modelVal.Elem()
 	}
@@ -360,16 +356,51 @@ func convertField(src, dst reflect.Value, autoTime bool) error {
 		return nil
 	}
 
-	// 时间戳转换
+	// 时间戳转换：time.Time / *time.Time ↔ *timestamppb.Timestamp
+	// 仅在 autoTime 开启时生效，支持以下四种转换路径：
 	if autoTime {
+		// time.Time → *timestamppb.Timestamp（值类型时间 → PB 时间戳指针）
 		if srcType == timeType && dstType == timestampPtrType {
 			t := src.Interface().(time.Time)
+			if t.IsZero() {
+				return nil
+			}
 			dst.Set(reflect.ValueOf(timestamppb.New(t)))
 			return nil
 		}
+		// *timestamppb.Timestamp → time.Time（PB 时间戳指针 → 值类型时间）
 		if srcType == timestampPtrType && dstType == timeType {
 			return convertTimestampToTime(src, dst)
 		}
+		// *time.Time → *timestamppb.Timestamp（时间指针 → PB 时间戳指针）
+		// 当源值为 nil 或零值时直接返回，目标保持零值
+		if srcType == timePtrType && dstType == timestampPtrType {
+			if src.IsNil() {
+				return nil
+			}
+			t := src.Interface().(*time.Time)
+			if t.IsZero() {
+				return nil
+			}
+			dst.Set(reflect.ValueOf(timestamppb.New(*t)))
+			return nil
+		}
+		// *timestamppb.Timestamp → *time.Time（PB 时间戳指针 → 时间指针）
+		// 当源值为 nil 时直接返回，目标保持零值
+		if srcType == timestampPtrType && dstType == timePtrType {
+			if src.IsNil() {
+				return nil
+			}
+			ts := src.Interface().(*timestamppb.Timestamp)
+			t := ts.AsTime()
+			dst.Set(reflect.ValueOf(&t))
+			return nil
+		}
+	}
+
+	// Wrappers 类型自动转换: *T ↔ *wrapperspb.XxxValue
+	if handled, err := tryConvertWrapper(src, dst); handled {
+		return err
 	}
 
 	// 整数类型转换
@@ -383,10 +414,15 @@ func convertField(src, dst reflect.Value, autoTime bool) error {
 		return nil
 	}
 
-	// 可转换类型
+	// 可转换类型（命名切片类型如 StringSlice ↔ []string 走此快速路径，O(1) 切片头转换）
 	if srcType.ConvertibleTo(dstType) {
 		dst.Set(src.Convert(dstType))
 		return nil
+	}
+
+	// 切片转换（元素类型不同时逐元素转换，如 []InnerModel ↔ []InnerPB）
+	if srcType.Kind() == reflect.Slice && dstType.Kind() == reflect.Slice {
+		return convertSlice(src, dst, autoTime)
 	}
 
 	// 指针处理
@@ -400,14 +436,51 @@ func convertField(src, dst reflect.Value, autoTime bool) error {
 		return convertField(src.Elem(), dst, autoTime)
 	}
 
-	// 切片转换
-	if srcType.Kind() == reflect.Slice && dstType.Kind() == reflect.Slice {
-		return convertSlice(src, dst, autoTime)
+	// 结构体转换（优先查找已注册的转换器）
+	if srcType.Kind() == reflect.Struct && dstType.Kind() == reflect.Struct {
+		if converter, ok := findConverter(srcType, dstType); ok {
+			return converter.ConvertModelToPB(src.Addr().Interface(), dst.Addr().Interface())
+		}
+		return convertStruct(src, dst, autoTime)
 	}
 
-	// 结构体转换
-	if srcType.Kind() == reflect.Struct && dstType.Kind() == reflect.Struct {
-		return convertStruct(src, dst, autoTime)
+	// 结构体指针转换（优先查找已注册的转换器）
+	// 快速短路：至少一侧是 struct/ptr 才进入
+	srcKind := srcType.Kind()
+	dstKind := dstType.Kind()
+	if srcKind != reflect.Struct && srcKind != reflect.Ptr && dstKind != reflect.Struct && dstKind != reflect.Ptr {
+		return nil
+	}
+	srcIsStruct := srcKind == reflect.Struct
+	srcIsStructPtr := srcKind == reflect.Ptr && srcType.Elem().Kind() == reflect.Struct
+	dstIsStruct := dstKind == reflect.Struct
+	dstIsStructPtr := dstKind == reflect.Ptr && dstType.Elem().Kind() == reflect.Struct
+
+	if (srcIsStruct || srcIsStructPtr) && (dstIsStruct || dstIsStructPtr) && (srcIsStructPtr || dstIsStructPtr) {
+		srcElem := srcType
+		if srcIsStructPtr {
+			if src.IsNil() {
+				return nil
+			}
+			srcElem = srcType.Elem()
+		}
+		dstElem := dstType
+		if dstIsStructPtr {
+			dstElem = dstType.Elem()
+		}
+		if converter, ok := findConverter(srcElem, dstElem); ok {
+			srcVal := src
+			if srcIsStructPtr {
+				srcVal = src.Elem()
+			}
+			if dstIsStructPtr {
+				if dst.IsNil() {
+					dst.Set(reflect.New(dstType.Elem()))
+				}
+				return converter.ConvertModelToPB(srcVal.Addr().Interface(), dst.Interface())
+			}
+			return converter.ConvertModelToPB(srcVal.Addr().Interface(), dst.Addr().Interface())
+		}
 	}
 
 	return nil
@@ -503,4 +576,30 @@ func convertStruct(src, dst reflect.Value, autoTime bool) error {
 		}
 	}
 	return nil
+}
+
+// converterLookupCache findConverter 查找结果缓存，避免重复 sync.Map.Load
+var converterLookupCache sync.Map
+
+// findConverter 从全局缓存中查找已注册的转换器（带缓存）
+func findConverter(srcType, dstType reflect.Type) (*BidiConverter, bool) {
+	key := typePair{srcType, dstType}
+	if c, ok := converterLookupCache.Load(key); ok {
+		return c.(*BidiConverter), true
+	}
+
+	if c, ok := converterCache.Load(key); ok {
+		bc := c.(*BidiConverter)
+		converterLookupCache.Store(key, bc)
+		return bc, true
+	}
+
+	reverseKey := typePair{dstType, srcType}
+	if c, ok := converterCache.Load(reverseKey); ok {
+		bc := c.(*BidiConverter)
+		converterLookupCache.Store(key, bc)
+		return bc, true
+	}
+
+	return nil, false
 }
