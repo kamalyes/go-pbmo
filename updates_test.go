@@ -12,9 +12,10 @@
 package pbmo
 
 import (
+	"testing"
+
 	"github.com/stretchr/testify/assert"
 	"google.golang.org/protobuf/types/known/wrapperspb"
-	"testing"
 )
 
 func TestNewUpdates(t *testing.T) {
@@ -48,13 +49,23 @@ func TestUpdatesBuilderSetIfNotEmpty(t *testing.T) {
 	b := NewUpdates().
 		SetIfNotEmpty("name", "hello").
 		SetIfNotEmpty("empty", "").
-		SetIfNotEmpty("space", " ")
+		SetIfNotEmpty("space", " ").
+		SetIfNotEmpty("tab", "\t").
+		SetIfNotEmpty("newline", "\n").
+		SetIfNotEmpty("null", "null").
+		SetIfNotEmpty("undefined", "undefined").
+		SetIfNotEmpty("NULL", "NULL").
+		SetIfNotEmpty("UNDEFINED", "UNDEFINED")
 
 	result := b.Build()
+	// 只有 "hello" 应该被设置，其他都应该被过滤掉
 	assert.Equal(t, "hello", result["name"])
-	assert.Equal(t, " ", result["space"])
-	_, ok := result["empty"]
-	assert.False(t, ok)
+
+	// 空白字符、"null"、"undefined" 应该被过滤（不区分大小写）
+	for _, key := range []string{"empty", "space", "tab", "newline", "null", "undefined", "NULL", "UNDEFINED"} {
+		_, ok := result[key]
+		assert.False(t, ok, "key=%s should be filtered out", key)
+	}
 }
 
 func TestUpdatesBuilderSetIfNotNil(t *testing.T) {
@@ -84,6 +95,9 @@ func TestUpdatesBuilderSetIfNotZero(t *testing.T) {
 		SetIfNotZero("int2", zeroInt).
 		SetIfNotZero("str1", "hello").
 		SetIfNotZero("str2", zeroStr).
+		SetIfNotZero("str3", "  ").        // 空白字符串，IsEmptyValue 会判定为空
+		SetIfNotZero("str4", "null").      // "null" 字符串，IsEmptyValue 会判定为空
+		SetIfNotZero("str5", "undefined"). // "undefined" 字符串，IsEmptyValue 会判定为空
 		SetIfNotZero("bool1", true).
 		SetIfNotZero("bool2", zeroBool).
 		SetIfNotZero("nil", nil)
@@ -93,7 +107,8 @@ func TestUpdatesBuilderSetIfNotZero(t *testing.T) {
 	assert.Equal(t, "hello", result["str1"])
 	assert.Equal(t, true, result["bool1"])
 
-	for _, key := range []string{"int2", "str2", "bool2", "nil"} {
+	// 这些键不应该存在（被 IsEmptyValue 过滤）
+	for _, key := range []string{"int2", "str2", "str3", "str4", "str5", "bool2", "nil"} {
 		_, ok := result[key]
 		assert.False(t, ok, "key=%s should not exist", key)
 	}
@@ -271,22 +286,4 @@ func TestUpdatesBuilderRealWorldScenario(t *testing.T) {
 	assert.Equal(t, `{"theme":"dark"}`, result["config"])
 	_, ok := result["icon"]
 	assert.False(t, ok)
-}
-
-func TestIsZeroValueInternal(t *testing.T) {
-	assert.True(t, isZeroValue(nil))
-	assert.True(t, isZeroValue(0))
-	assert.True(t, isZeroValue(""))
-	assert.True(t, isZeroValue(false))
-	assert.True(t, isZeroValue(int32(0)))
-
-	var p *int
-	assert.True(t, isZeroValue(p))
-
-	assert.False(t, isZeroValue(1))
-	assert.False(t, isZeroValue("x"))
-	assert.False(t, isZeroValue(true))
-
-	v := 42
-	assert.False(t, isZeroValue(&v))
 }

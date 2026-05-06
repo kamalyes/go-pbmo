@@ -2,7 +2,7 @@
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2026-04-23 00:00:00
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2026-04-23 20:52:55
+ * @LastEditTime: 2026-05-06 16:45:23
  * @FilePath: \go-pbmo\updates.go
  * @Description: 更新字段构建器 - 链式构建 map[string]interface{}
  * 灵感来自 go-toolbox/httpx.ParamsBuilder 和 go-sqlbuilder/AddFilterIfNotEmpty
@@ -15,9 +15,11 @@ package pbmo
 
 import (
 	"fmt"
-	"google.golang.org/protobuf/types/known/wrapperspb"
 	"reflect"
 	"strings"
+
+	"github.com/kamalyes/go-toolbox/pkg/validator"
+	"google.golang.org/protobuf/types/known/wrapperspb"
 )
 
 // UpdatesBuilder 更新字段构建器
@@ -48,10 +50,32 @@ func (b *UpdatesBuilder) SetIf(condition bool, key string, value interface{}) *U
 
 // --- IfNotEmpty 系列：值非空时才设置 ---
 
-func (b *UpdatesBuilder) SetIfNotEmpty(key string, value string) *UpdatesBuilder {
-	if value != "" {
-		b.updates[key] = value
+// SetIfNotEmpty 设置字符串字段（非空时）
+// 支持 string 和 *wrapperspb.StringValue 类型
+// 使用 IsEmptyValue 进行严格的空值判断：
+// - 过滤空字符串、空白字符（空格、tab、换行等）
+// - 过滤 "null"、"undefined" 字符串（不区分大小写）
+// - 过滤 nil 值
+func (b *UpdatesBuilder) SetIfNotEmpty(key string, value interface{}) *UpdatesBuilder {
+	if value == nil {
+		return b
 	}
+
+	// 处理 protobuf StringValue wrapper
+	if sv, ok := value.(*wrapperspb.StringValue); ok {
+		if !validator.IsEmptyValue(reflect.ValueOf(sv)) {
+			b.updates[key] = sv.Value
+		}
+		return b
+	}
+
+	if str, ok := value.(string); ok {
+		if !validator.IsEmptyValue(reflect.ValueOf(str)) {
+			b.updates[key] = str
+		}
+		return b
+	}
+
 	return b
 }
 
@@ -67,7 +91,7 @@ func (b *UpdatesBuilder) SetIfNotNil(key string, value interface{}) *UpdatesBuil
 // --- IfNotZero 系列：非零值时才设置（使用反射判断） ---
 
 func (b *UpdatesBuilder) SetIfNotZero(key string, value interface{}) *UpdatesBuilder {
-	if !isZeroValue(value) {
+	if !validator.IsEmptyValue(reflect.ValueOf(value)) {
 		b.updates[key] = value
 	}
 	return b
@@ -168,15 +192,4 @@ func (b *UpdatesBuilder) String() string {
 		parts = append(parts, fmt.Sprintf("%s=%v", k, v))
 	}
 	return "{" + strings.Join(parts, ", ") + "}"
-}
-
-func isZeroValue(v interface{}) bool {
-	if v == nil {
-		return true
-	}
-	rv := reflect.ValueOf(v)
-	if rv.Kind() == reflect.Ptr {
-		return rv.IsNil()
-	}
-	return rv.Interface() == reflect.Zero(rv.Type()).Interface()
 }
