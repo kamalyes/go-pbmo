@@ -18,6 +18,8 @@ import (
 	"reflect"
 	"strings"
 
+	"github.com/kamalyes/go-toolbox/pkg/serializer"
+	"github.com/kamalyes/go-toolbox/pkg/stringx"
 	"github.com/kamalyes/go-toolbox/pkg/validator"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 )
@@ -63,14 +65,14 @@ func (b *UpdatesBuilder) SetIfNotEmpty(key string, value interface{}) *UpdatesBu
 
 	// 处理 protobuf StringValue wrapper
 	if sv, ok := value.(*wrapperspb.StringValue); ok {
-		if !validator.IsEmptyValue(reflect.ValueOf(sv)) {
+		if !isEmptyUpdateValue(sv) {
 			b.updates[key] = sv.Value
 		}
 		return b
 	}
 
 	if str, ok := value.(string); ok {
-		if !validator.IsEmptyValue(reflect.ValueOf(str)) {
+		if !isEmptyUpdateValue(str) {
 			b.updates[key] = str
 		}
 		return b
@@ -91,7 +93,7 @@ func (b *UpdatesBuilder) SetIfNotNil(key string, value interface{}) *UpdatesBuil
 // --- IfNotZero 系列：非零值时才设置（使用反射判断） ---
 
 func (b *UpdatesBuilder) SetIfNotZero(key string, value interface{}) *UpdatesBuilder {
-	if !validator.IsEmptyValue(reflect.ValueOf(value)) {
+	if !isEmptyUpdateValue(value) {
 		b.updates[key] = value
 	}
 	return b
@@ -109,6 +111,18 @@ func (b *UpdatesBuilder) SetStringVal(key string, val *wrapperspb.StringValue) *
 func (b *UpdatesBuilder) SetStringValAny(key string, val *wrapperspb.StringValue) *UpdatesBuilder {
 	if val != nil {
 		b.updates[key] = val.Value
+	}
+	return b
+}
+
+func (b *UpdatesBuilder) SetJSON(key string, value string, defaultJSON ...string) *UpdatesBuilder {
+	b.updates[key] = serializer.NormalizeJSONText(value, defaultJSON...)
+	return b
+}
+
+func (b *UpdatesBuilder) SetJSONVal(key string, val *wrapperspb.StringValue, defaultJSON ...string) *UpdatesBuilder {
+	if val != nil {
+		b.updates[key] = serializer.NormalizeJSONText(val.Value, defaultJSON...)
 	}
 	return b
 }
@@ -192,4 +206,21 @@ func (b *UpdatesBuilder) String() string {
 		parts = append(parts, fmt.Sprintf("%s=%v", k, v))
 	}
 	return "{" + strings.Join(parts, ", ") + "}"
+}
+
+func isEmptyUpdateValue(value interface{}) bool {
+	if value == nil {
+		return true
+	}
+	if sv, ok := value.(*wrapperspb.StringValue); ok {
+		return sv == nil || isEmptyUpdateString(sv.Value)
+	}
+	if str, ok := value.(string); ok {
+		return isEmptyUpdateString(str)
+	}
+	return validator.IsEmptyValue(reflect.ValueOf(value))
+}
+
+func isEmptyUpdateString(value string) bool {
+	return stringx.IsBlank(value) || validator.IfNullOrUndefined(value)
 }

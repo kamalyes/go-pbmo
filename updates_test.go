@@ -155,6 +155,31 @@ func TestUpdatesBuilderSetStringValAny(t *testing.T) {
 	assert.False(t, ok)
 }
 
+func TestUpdatesBuilderSetJSON(t *testing.T) {
+	b := NewUpdates().
+		SetJSON("detail", "").
+		SetJSON("list", " ", "[]").
+		SetJSON("payload", ` {"name":"test"} `)
+
+	result := b.Build()
+	assert.Equal(t, "{}", result["detail"])
+	assert.Equal(t, "[]", result["list"])
+	assert.Equal(t, `{"name":"test"}`, result["payload"])
+}
+
+func TestUpdatesBuilderSetJSONVal(t *testing.T) {
+	b := NewUpdates().
+		SetJSONVal("detail", wrapperspb.String("")).
+		SetJSONVal("payload", wrapperspb.String(` {"name":"test"} `)).
+		SetJSONVal("nil", nil)
+
+	result := b.Build()
+	assert.Equal(t, "{}", result["detail"])
+	assert.Equal(t, `{"name":"test"}`, result["payload"])
+	_, ok := result["nil"]
+	assert.False(t, ok)
+}
+
 func TestUpdatesBuilderSetInt32Val(t *testing.T) {
 	b := NewUpdates().
 		SetInt32Val("sort", wrapperspb.Int32(5)).
