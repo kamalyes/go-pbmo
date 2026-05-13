@@ -127,6 +127,24 @@ func (b *UpdatesBuilder) SetJSONVal(key string, val *wrapperspb.StringValue, def
 	return b
 }
 
+func (b *UpdatesBuilder) SetJSONSlice(key string, value interface{}) *UpdatesBuilder {
+	if value == nil {
+		return b
+	}
+	v := reflect.ValueOf(value)
+	if v.Kind() != reflect.Slice && v.Kind() != reflect.Array {
+		return b
+	}
+	if v.Kind() == reflect.Slice && v.IsNil() {
+		return b
+	}
+	data, err := serializer.JSONMarshal(value)
+	if err == nil {
+		b.updates[key] = string(data)
+	}
+	return b
+}
+
 func (b *UpdatesBuilder) SetInt32Val(key string, val *wrapperspb.Int32Value) *UpdatesBuilder {
 	if val != nil {
 		b.updates[key] = val.Value

@@ -180,6 +180,21 @@ func TestUpdatesBuilderSetJSONVal(t *testing.T) {
 	assert.False(t, ok)
 }
 
+func TestUpdatesBuilderSetJSONSlice(t *testing.T) {
+	var nilValues []int
+
+	b := NewUpdates().
+		SetJSONSlice("ids", []int{1, 2, 3}).
+		SetJSONSlice("empty", []string{}).
+		SetJSONSlice("nil", nilValues)
+
+	result := b.Build()
+	assert.JSONEq(t, `[1,2,3]`, result["ids"].(string))
+	assert.JSONEq(t, `[]`, result["empty"].(string))
+	_, ok := result["nil"]
+	assert.False(t, ok)
+}
+
 func TestUpdatesBuilderSetInt32Val(t *testing.T) {
 	b := NewUpdates().
 		SetInt32Val("sort", wrapperspb.Int32(5)).

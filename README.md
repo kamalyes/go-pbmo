@@ -36,6 +36,7 @@
 - 🔢 **枚举映射** - 支持 int32 和泛型枚举映射
 - 🎭 **脱敏转换** - 集成 go-toolbox/desensitize
 - 🛡️ **安全转换** - 集成 go-toolbox/safe 避免 nil panic
+- 🧩 **更新构建器** - `NewUpdates()` 链式构建局部更新，支持 JSON 字符串和 JSON Slice 字段
 - ⚙️ **选项模式** - Functional Options + 链式调用灵活配置
 
 ## 🏗️ 架构概览
@@ -182,6 +183,20 @@ converter := pbmo.NewBidiConverter(UserPB{}, UserModel{}).
     WithDesensitize(true)
 ```
 
+### 更新字段构建器
+
+`NewUpdates()` 用于构建 `map[string]interface{}`，适合传给 GORM `Updates` 或仓储层局部更新方法。JSON 数组字段请使用 `SetJSONSlice`，避免把 Go slice 作为标量值写入 JSON 列。
+
+```go
+updates := pbmo.NewUpdates().
+    SetStringVal("url", req.Url).
+    SetInt32Val("sort_order", wrapperspb.Int32(req.SortOrder)).
+    SetJSONSlice("display_pages", req.DisplayPages).
+    Build()
+```
+
+`SetJSONSlice` 仅处理 slice/array，nil slice 会被跳过，非 nil 空切片会写入 `[]`。
+
 ## 📋 泛型 API 速查表
 
 | 函数 | 签名 | 说明 |
@@ -225,6 +240,7 @@ converter := pbmo.NewBidiConverter(UserPB{}, UserModel{}).
 | 🎭 脱敏转换 | [desensitize.go](desensitize.go) | 数据脱敏 | 隐私保护 |
 | 🛡️ 安全转换 | [safe.go](safe.go) | nil 安全转换 | 防止 panic |
 | ⏰ 时间转换 | [time.go](time.go) | Time ↔ Timestamp | 时间字段处理 |
+| 🧩 更新构建器 | [updates.go](updates.go) | 链式构建局部更新字段 | GORM Updates、JSON 字段更新 |
 | 🔧 辅助函数 | [helpers.go](helpers.go) | 反射工具、类型判断 | 内部使用 |
 | ❌ 错误定义 | [errors.go](errors.go) | 类型化错误体系 | 错误处理 |
 | ⚙️ 选项模式 | [option.go](option.go) | Functional Options | 配置管理 |
