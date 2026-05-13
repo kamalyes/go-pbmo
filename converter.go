@@ -420,6 +420,11 @@ func convertField(src, dst reflect.Value, autoTime bool) error {
 		return nil
 	}
 
+	// 数据包装器转换
+	if handled, err := tryConvertDataWrapper(src, dst, autoTime); handled {
+		return err
+	}
+
 	// 切片转换（元素类型不同时逐元素转换，如 []InnerModel ↔ []InnerPB）
 	if srcType.Kind() == reflect.Slice && dstType.Kind() == reflect.Slice {
 		return convertSlice(src, dst, autoTime)
@@ -543,6 +548,56 @@ func convertToPointer(src, dst reflect.Value, autoTime bool) error {
 		dst.Set(newVal)
 	}
 	return err
+}
+
+// tryConvertDataWrapper 尝试转换数据包装器类型
+func tryConvertDataWrapper(src, dst reflect.Value, autoTime bool) (bool, error) {
+	if data, ok := dataWrapperField(dst, true); ok {
+		return true, convertField(src, data, autoTime)
+	}
+	if data, ok := dataWrapperField(src, false); ok {
+		return true, convertField(data, dst, autoTime)
+	}
+	return false, nil
+}
+
+// dataWrapperField 获取数据包装器字段
+func dataWrapperField(v reflect.Value, writable bool) (reflect.Value, bool) {
+	if !v.IsValid() || !isDataWrapperType(v.Type()) {
+		return reflect.Value{}, false
+	}
+	if v.Kind() == reflect.Ptr {
+		if v.IsNil() {
+			if !writable || !v.CanSet() {
+				return reflect.Value{}, false
+			}
+			v.Set(reflect.New(v.Type().Elem()))
+		}
+		v = v.Elem()
+	}
+	field := v.FieldByName("Data")
+	if !field.IsValid() {
+		return reflect.Value{}, false
+	}
+	if writable && !field.CanSet() {
+		return reflect.Value{}, false
+	}
+	if !writable && !field.CanInterface() {
+		return reflect.Value{}, false
+	}
+	return field, true
+}
+
+// isDataWrapperType 判断是否为数据包装器类型
+func isDataWrapperType(t reflect.Type) bool {
+	if t.Kind() == reflect.Ptr {
+		t = t.Elem()
+	}
+	if t.Kind() != reflect.Struct {
+		return false
+	}
+	field, ok := t.FieldByName("Data")
+	return ok && field.PkgPath == ""
 }
 
 // convertSlice 切片转换

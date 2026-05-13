@@ -3,7 +3,7 @@ module github.com/kamalyes/go-pbmo
 go 1.25.0
 
 require (
-	github.com/kamalyes/go-toolbox v0.11.89-0.20260506082115-a3416b69608a
+	github.com/kamalyes/go-toolbox v0.12.0
 	github.com/stretchr/testify v1.11.1
 	google.golang.org/protobuf v1.36.11
 )
@@ -14,3 +14,6 @@ require (
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
+
+// 本地开发替换
+// replace github.com/kamalyes/go-toolbox => ../go-toolbox
