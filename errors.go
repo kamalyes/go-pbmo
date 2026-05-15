@@ -19,14 +19,14 @@ import (
 
 // 错误类型常量
 const (
-	ErrTypeConversion   errorx.ErrorType = iota + 1 // 转换错误
-	ErrTypeValidation                               // 校验错误
-	ErrTypeNilValue                                 // 空值错误
-	ErrTypeTypeMismatch                             // 类型不匹配
-	ErrTypeFieldMapping                             // 字段映射错误
-	ErrTypeBatch                                    // 批量操作错误
-	ErrTypeDesensitize                              // 脱敏错误
-	ErrTypeRegistry                                 // 注册中心错误
+	ErrTypeConversion   errorx.ErrorType = iota + 20000 // 转换错误
+	ErrTypeValidation                                   // 校验错误
+	ErrTypeNilValue                                     // 空值错误
+	ErrTypeTypeMismatch                                 // 类型不匹配
+	ErrTypeFieldMapping                                 // 字段映射错误
+	ErrTypeBatch                                        // 批量操作错误
+	ErrTypeDesensitize                                  // 脱敏错误
+	ErrTypeRegistry                                     // 注册中心错误
 )
 
 func init() {
