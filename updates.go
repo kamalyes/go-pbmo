@@ -20,7 +20,7 @@ import (
 
 	"github.com/kamalyes/go-toolbox/pkg/serializer"
 	"github.com/kamalyes/go-toolbox/pkg/stringx"
-	"github.com/kamalyes/go-toolbox/pkg/validator"
+	"github.com/kamalyes/go-argus"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 )
 
