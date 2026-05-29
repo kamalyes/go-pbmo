@@ -13,6 +13,7 @@
 package pbmo
 
 import (
+	"fmt"
 	"reflect"
 	"sync"
 	"time"
@@ -425,9 +426,20 @@ func convertField(src, dst reflect.Value, autoTime bool) error {
 		return err
 	}
 
+	// 字符串兜底：目标为 string 时尝试 fmt.Sprint 转换（如 map[string]any → map[string]string 中 int/bool 等值）
+	if dstType.Kind() == reflect.String && srcType.Kind() != reflect.String {
+		dst.SetString(fmt.Sprint(src.Interface()))
+		return nil
+	}
+
 	// 切片转换（元素类型不同时逐元素转换，如 []InnerModel ↔ []InnerPB）
 	if srcType.Kind() == reflect.Slice && dstType.Kind() == reflect.Slice {
 		return convertSlice(src, dst, autoTime)
+	}
+
+	// Map 转换（键值类型不同时逐值转换，如 map[string]any → map[string]string）
+	if srcType.Kind() == reflect.Map && dstType.Kind() == reflect.Map {
+		return convertMap(src, dst, autoTime)
 	}
 
 	// 指针处理
@@ -613,6 +625,31 @@ func convertSlice(src, dst reflect.Value, autoTime bool) error {
 		}
 	}
 	dst.Set(dstSlice)
+	return nil
+}
+
+func convertMap(src, dst reflect.Value, autoTime bool) error {
+	if src.IsNil() {
+		return nil
+	}
+	dstMap := reflect.MakeMapWithSize(dst.Type(), src.Len())
+	iter := src.MapRange()
+	for iter.Next() {
+		dstKey := iter.Key()
+		if src.Type().Key() != dst.Type().Key() {
+			convertedKey := reflect.New(dst.Type().Key()).Elem()
+			if err := convertField(iter.Key(), convertedKey, autoTime); err != nil {
+				return err
+			}
+			dstKey = convertedKey
+		}
+		dstVal := reflect.New(dst.Type().Elem()).Elem()
+		if err := convertField(iter.Value(), dstVal, autoTime); err != nil {
+			return err
+		}
+		dstMap.SetMapIndex(dstKey, dstVal)
+	}
+	dst.Set(dstMap)
 	return nil
 }
 

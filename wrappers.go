@@ -43,6 +43,18 @@ var (
 	stringPtrType  = reflect.TypeOf((*string)(nil))  // *string 类型
 )
 
+// Go 基本类型值类型变量，用于反射类型匹配
+var (
+	int32ValueType   = reflect.TypeOf(int32(0))
+	int64ValueType   = reflect.TypeOf(int64(0))
+	uint32ValueType  = reflect.TypeOf(uint32(0))
+	uint64ValueType  = reflect.TypeOf(uint64(0))
+	float32ValueType = reflect.TypeOf(float32(0))
+	float64ValueType = reflect.TypeOf(float64(0))
+	boolValueType    = reflect.TypeOf(false)
+	stringValueType  = reflect.TypeOf("")
+)
+
 // wrapperConverter 单个 Wrapper 类型的转换器
 // wrapperType: *wrapperspb.XxxValue 的反射类型
 // ptrType: *T（Go 基本类型指针）的反射类型
@@ -51,8 +63,11 @@ var (
 type wrapperConverter struct {
 	wrapperType reflect.Type                      // *wrapperspb.XxxValue 反射类型
 	ptrType     reflect.Type                      // *T Go 基本类型指针反射类型
+	valueType   reflect.Type                      // T Go 基本类型值反射类型
 	wrap        func(reflect.Value) reflect.Value // *T → *wrapperspb.XxxValue 包装函数
 	unwrap      func(reflect.Value) reflect.Value // *wrapperspb.XxxValue → *T 解包函数
+	valueWrap   func(reflect.Value) reflect.Value // T → *wrapperspb.XxxValue 值类型包装函数
+	valueUnwrap func(reflect.Value) reflect.Value // *wrapperspb.XxxValue → T 值类型解包函数
 }
 
 // wrapperConverters 所有 Wrapper 类型的转换器列表，在 init 中初始化
@@ -63,9 +78,8 @@ var wrapperConverters []wrapperConverter
 // 当源值为 nil 指针时，wrap/unwrap 返回对应类型的零值（nil 指针）
 func init() {
 	wrapperConverters = []wrapperConverter{
-		{ // *int32 ↔ *wrapperspb.Int32Value
-			wrapperType: int32ValuePtrType,
-			ptrType:     int32PtrType,
+		{
+			wrapperType: int32ValuePtrType, ptrType: int32PtrType, valueType: int32ValueType,
 			wrap: func(v reflect.Value) reflect.Value {
 				if v.IsNil() {
 					return reflect.Zero(int32ValuePtrType)
@@ -79,10 +93,16 @@ func init() {
 				val := v.Interface().(*wrapperspb.Int32Value).Value
 				return reflect.ValueOf(&val)
 			},
+			valueWrap: func(v reflect.Value) reflect.Value { return reflect.ValueOf(wrapperspb.Int32(v.Interface().(int32))) },
+			valueUnwrap: func(v reflect.Value) reflect.Value {
+				if v.IsNil() {
+					return reflect.Zero(int32ValueType)
+				}
+				return reflect.ValueOf(v.Interface().(*wrapperspb.Int32Value).Value)
+			},
 		},
-		{ // *int64 ↔ *wrapperspb.Int64Value
-			wrapperType: int64ValuePtrType,
-			ptrType:     int64PtrType,
+		{
+			wrapperType: int64ValuePtrType, ptrType: int64PtrType, valueType: int64ValueType,
 			wrap: func(v reflect.Value) reflect.Value {
 				if v.IsNil() {
 					return reflect.Zero(int64ValuePtrType)
@@ -96,10 +116,16 @@ func init() {
 				val := v.Interface().(*wrapperspb.Int64Value).Value
 				return reflect.ValueOf(&val)
 			},
+			valueWrap: func(v reflect.Value) reflect.Value { return reflect.ValueOf(wrapperspb.Int64(v.Interface().(int64))) },
+			valueUnwrap: func(v reflect.Value) reflect.Value {
+				if v.IsNil() {
+					return reflect.Zero(int64ValueType)
+				}
+				return reflect.ValueOf(v.Interface().(*wrapperspb.Int64Value).Value)
+			},
 		},
-		{ // *uint32 ↔ *wrapperspb.UInt32Value
-			wrapperType: uint32ValuePtrType,
-			ptrType:     uint32PtrType,
+		{
+			wrapperType: uint32ValuePtrType, ptrType: uint32PtrType, valueType: uint32ValueType,
 			wrap: func(v reflect.Value) reflect.Value {
 				if v.IsNil() {
 					return reflect.Zero(uint32ValuePtrType)
@@ -113,10 +139,16 @@ func init() {
 				val := v.Interface().(*wrapperspb.UInt32Value).Value
 				return reflect.ValueOf(&val)
 			},
+			valueWrap: func(v reflect.Value) reflect.Value { return reflect.ValueOf(wrapperspb.UInt32(v.Interface().(uint32))) },
+			valueUnwrap: func(v reflect.Value) reflect.Value {
+				if v.IsNil() {
+					return reflect.Zero(uint32ValueType)
+				}
+				return reflect.ValueOf(v.Interface().(*wrapperspb.UInt32Value).Value)
+			},
 		},
-		{ // *uint64 ↔ *wrapperspb.UInt64Value
-			wrapperType: uint64ValuePtrType,
-			ptrType:     uint64PtrType,
+		{
+			wrapperType: uint64ValuePtrType, ptrType: uint64PtrType, valueType: uint64ValueType,
 			wrap: func(v reflect.Value) reflect.Value {
 				if v.IsNil() {
 					return reflect.Zero(uint64ValuePtrType)
@@ -130,10 +162,16 @@ func init() {
 				val := v.Interface().(*wrapperspb.UInt64Value).Value
 				return reflect.ValueOf(&val)
 			},
+			valueWrap: func(v reflect.Value) reflect.Value { return reflect.ValueOf(wrapperspb.UInt64(v.Interface().(uint64))) },
+			valueUnwrap: func(v reflect.Value) reflect.Value {
+				if v.IsNil() {
+					return reflect.Zero(uint64ValueType)
+				}
+				return reflect.ValueOf(v.Interface().(*wrapperspb.UInt64Value).Value)
+			},
 		},
-		{ // *float32 ↔ *wrapperspb.FloatValue
-			wrapperType: floatValuePtrType,
-			ptrType:     float32PtrType,
+		{
+			wrapperType: floatValuePtrType, ptrType: float32PtrType, valueType: float32ValueType,
 			wrap: func(v reflect.Value) reflect.Value {
 				if v.IsNil() {
 					return reflect.Zero(floatValuePtrType)
@@ -147,10 +185,16 @@ func init() {
 				val := v.Interface().(*wrapperspb.FloatValue).Value
 				return reflect.ValueOf(&val)
 			},
+			valueWrap: func(v reflect.Value) reflect.Value { return reflect.ValueOf(wrapperspb.Float(v.Interface().(float32))) },
+			valueUnwrap: func(v reflect.Value) reflect.Value {
+				if v.IsNil() {
+					return reflect.Zero(float32ValueType)
+				}
+				return reflect.ValueOf(v.Interface().(*wrapperspb.FloatValue).Value)
+			},
 		},
-		{ // *float64 ↔ *wrapperspb.DoubleValue
-			wrapperType: doubleValuePtrType,
-			ptrType:     float64PtrType,
+		{
+			wrapperType: doubleValuePtrType, ptrType: float64PtrType, valueType: float64ValueType,
 			wrap: func(v reflect.Value) reflect.Value {
 				if v.IsNil() {
 					return reflect.Zero(doubleValuePtrType)
@@ -164,10 +208,18 @@ func init() {
 				val := v.Interface().(*wrapperspb.DoubleValue).Value
 				return reflect.ValueOf(&val)
 			},
+			valueWrap: func(v reflect.Value) reflect.Value {
+				return reflect.ValueOf(wrapperspb.Double(v.Interface().(float64)))
+			},
+			valueUnwrap: func(v reflect.Value) reflect.Value {
+				if v.IsNil() {
+					return reflect.Zero(float64ValueType)
+				}
+				return reflect.ValueOf(v.Interface().(*wrapperspb.DoubleValue).Value)
+			},
 		},
-		{ // *bool ↔ *wrapperspb.BoolValue
-			wrapperType: boolValuePtrType,
-			ptrType:     boolPtrType,
+		{
+			wrapperType: boolValuePtrType, ptrType: boolPtrType, valueType: boolValueType,
 			wrap: func(v reflect.Value) reflect.Value {
 				if v.IsNil() {
 					return reflect.Zero(boolValuePtrType)
@@ -181,10 +233,16 @@ func init() {
 				val := v.Interface().(*wrapperspb.BoolValue).Value
 				return reflect.ValueOf(&val)
 			},
+			valueWrap: func(v reflect.Value) reflect.Value { return reflect.ValueOf(wrapperspb.Bool(v.Interface().(bool))) },
+			valueUnwrap: func(v reflect.Value) reflect.Value {
+				if v.IsNil() {
+					return reflect.Zero(boolValueType)
+				}
+				return reflect.ValueOf(v.Interface().(*wrapperspb.BoolValue).Value)
+			},
 		},
-		{ // *string ↔ *wrapperspb.StringValue
-			wrapperType: stringValuePtrType,
-			ptrType:     stringPtrType,
+		{
+			wrapperType: stringValuePtrType, ptrType: stringPtrType, valueType: stringValueType,
 			wrap: func(v reflect.Value) reflect.Value {
 				if v.IsNil() {
 					return reflect.Zero(stringValuePtrType)
@@ -197,6 +255,13 @@ func init() {
 				}
 				val := v.Interface().(*wrapperspb.StringValue).Value
 				return reflect.ValueOf(&val)
+			},
+			valueWrap: func(v reflect.Value) reflect.Value { return reflect.ValueOf(wrapperspb.String(v.Interface().(string))) },
+			valueUnwrap: func(v reflect.Value) reflect.Value {
+				if v.IsNil() {
+					return reflect.Zero(stringValueType)
+				}
+				return reflect.ValueOf(v.Interface().(*wrapperspb.StringValue).Value)
 			},
 		},
 	}
@@ -215,7 +280,6 @@ func tryConvertWrapper(src, dst reflect.Value) (bool, error) {
 	dstType := dst.Type()
 
 	for _, wc := range wrapperConverters {
-		// *T → *wrapperspb.XxxValue（Model → PB 方向）
 		if srcType == wc.ptrType && dstType == wc.wrapperType {
 			result := wc.wrap(src)
 			if result.IsValid() {
@@ -223,9 +287,20 @@ func tryConvertWrapper(src, dst reflect.Value) (bool, error) {
 			}
 			return true, nil
 		}
-		// *wrapperspb.XxxValue → *T（PB → Model 方向）
 		if srcType == wc.wrapperType && dstType == wc.ptrType {
 			result := wc.unwrap(src)
+			if result.IsValid() {
+				dst.Set(result)
+			}
+			return true, nil
+		}
+		if srcType == wc.valueType && dstType == wc.wrapperType {
+			result := wc.valueWrap(src)
+			dst.Set(result)
+			return true, nil
+		}
+		if srcType == wc.wrapperType && dstType == wc.valueType {
+			result := wc.valueUnwrap(src)
 			if result.IsValid() {
 				dst.Set(result)
 			}

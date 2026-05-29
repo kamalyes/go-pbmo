@@ -14,6 +14,7 @@ package pbmo
 import (
 	"time"
 
+	"google.golang.org/protobuf/runtime/protoimpl"
 	"google.golang.org/protobuf/types/known/timestamppb"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 )
@@ -201,4 +202,105 @@ type TestWrapperFieldModel struct {
 	Name   string
 	MinVal *int32
 	MaxVal *int32
+}
+
+type TestWrapperValueModel struct {
+	Name     string
+	IsActive bool
+	Count    int32
+	Score    float64
+	Label    string
+}
+
+type TestWrapperValuePB struct {
+	state         protoimpl.MessageState  `protogen:"open.v1"`
+	Name          string                  `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	IsActive      *wrapperspb.BoolValue   `protobuf:"varint,2,opt,name=is_active,json=isActive,proto3" json:"is_active,omitempty"`
+	Count         *wrapperspb.Int32Value  `protobuf:"varint,3,opt,name=count,proto3" json:"count,omitempty"`
+	Score         *wrapperspb.DoubleValue `protobuf:"varint,4,opt,name=score,proto3" json:"score,omitempty"`
+	Label         *wrapperspb.StringValue `protobuf:"bytes,5,opt,name=label,proto3" json:"label,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+type TestMapModel struct {
+	Name     string
+	Metadata map[string]interface{}
+}
+
+type TestMapPB struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	Metadata      map[string]string      `protobuf:"bytes,2,rep,name=metadata,proto3" json:"metadata,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+type TestPBUpdatesMsg struct {
+	state         protoimpl.MessageState  `protogen:"open.v1"`
+	Status        int32                   `protobuf:"varint,1,opt,name=status,proto3" json:"status,omitempty"`
+	HostStatus    int32                   `protobuf:"varint,2,opt,name=host_status,json=hostStatus,proto3" json:"host_status,omitempty"`
+	TenantId      string                  `protobuf:"bytes,3,opt,name=tenant_id,json=tenantId,proto3" json:"tenant_id,omitempty"`
+	RegionCode    string                  `protobuf:"bytes,4,opt,name=region_code,json=regionCode,proto3" json:"region_code,omitempty"`
+	IsProxied     *wrapperspb.BoolValue   `protobuf:"varint,5,opt,name=is_proxied,json=isProxied,proto3" json:"is_proxied,omitempty"`
+	DisplayName   *wrapperspb.StringValue `protobuf:"bytes,6,opt,name=display_name,json=displayName,proto3" json:"display_name,omitempty"`
+	Priority      *wrapperspb.Int32Value  `protobuf:"varint,7,opt,name=priority,json=priority,proto3" json:"priority,omitempty"`
+	Score         *wrapperspb.DoubleValue `protobuf:"varint,8,opt,name=score,json=score,proto3" json:"score,omitempty"`
+	Metadata      map[string]string       `protobuf:"bytes,9,rep,name=metadata,proto3" json:"metadata,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+type TestPBUpdatesNoTag struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Name          string
+	Count         int32
+	Ignored       string `json:"-"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+type TestPBUpdatesEmpty struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+type TestModelForUpdates struct {
+	Name   string  `gorm:"column:name;type:varchar(255)" json:"name"`
+	Status int     `gorm:"column:status;type:int" json:"status"`
+	Score  float64 `gorm:"column:score;type:float" json:"score"`
+	Active bool    `gorm:"column:active;type:boolean" json:"active"`
+}
+
+type TestModelJsonTag struct {
+	Label  string `json:"label,omitempty"`
+	Count  int    `json:"count,omitempty"`
+	Secret string `json:"-"`
+}
+
+type TestModelAllTypes struct {
+	Int       int     `gorm:"column:int" json:"int"`
+	Int8      int8    `gorm:"column:int8" json:"int8"`
+	Int16     int16   `gorm:"column:int16" json:"int16"`
+	Int32     int32   `gorm:"column:int32" json:"int32"`
+	Int64     int64   `gorm:"column:int64" json:"int64"`
+	Uint      uint    `gorm:"column:uint" json:"uint"`
+	Uint8     uint8   `gorm:"column:uint8" json:"uint8"`
+	Uint16    uint16  `gorm:"column:uint16" json:"uint16"`
+	Uint32    uint32  `gorm:"column:uint32" json:"uint32"`
+	Uint64    uint64  `gorm:"column:uint64" json:"uint64"`
+	Float32   float32 `gorm:"column:float32" json:"float32"`
+	Float64   float64 `gorm:"column:float64" json:"float64"`
+	Bool      bool    `gorm:"column:bool" json:"bool"`
+	String    string  `gorm:"column:string" json:"string"`
+	ByteSlice []byte  `gorm:"column:byte_slice" json:"byte_slice"`
+	PtrInt    *int    `gorm:"column:ptr_int" json:"ptr_int"`
+	PtrString *string `gorm:"column:ptr_string" json:"ptr_string"`
+	PtrBool   *bool   `gorm:"column:ptr_bool" json:"ptr_bool"`
+}
+
+type TestModelUnexported struct {
+	Name   string `gorm:"column:name" json:"name"`
+	secret string
 }

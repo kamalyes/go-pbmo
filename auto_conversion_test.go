@@ -293,6 +293,86 @@ func TestWrapperFieldAutoConversion_NilFields(t *testing.T) {
 	assert.Nil(t, pb.MaxVal)
 }
 
+func TestWrapperValueConversion_ModelToPB(t *testing.T) {
+	Register[TestWrapperValueModel, TestWrapperValuePB]()
+
+	model := &TestWrapperValueModel{Name: "val-test", IsActive: true, Count: 42, Score: 99.5, Label: "hello"}
+	pb, err := ToPB[TestWrapperValueModel, TestWrapperValuePB](model)
+	assert.NoError(t, err)
+	assert.NotNil(t, pb)
+	assert.Equal(t, "val-test", pb.Name)
+	assert.NotNil(t, pb.IsActive)
+	assert.True(t, pb.IsActive.Value)
+	assert.NotNil(t, pb.Count)
+	assert.Equal(t, int32(42), pb.Count.Value)
+	assert.NotNil(t, pb.Score)
+	assert.Equal(t, 99.5, pb.Score.Value)
+	assert.NotNil(t, pb.Label)
+	assert.Equal(t, "hello", pb.Label.Value)
+}
+
+func TestWrapperValueConversion_PBToModel(t *testing.T) {
+	Register[TestWrapperValueModel, TestWrapperValuePB]()
+
+	pb := &TestWrapperValuePB{Name: "val-pb", IsActive: wrapperspb.Bool(false), Count: wrapperspb.Int32(7), Score: wrapperspb.Double(1.5), Label: wrapperspb.String("world")}
+	model, err := FromPB[TestWrapperValuePB, TestWrapperValueModel](pb)
+	assert.NoError(t, err)
+	assert.NotNil(t, model)
+	assert.Equal(t, "val-pb", model.Name)
+	assert.False(t, model.IsActive)
+	assert.Equal(t, int32(7), model.Count)
+	assert.Equal(t, 1.5, model.Score)
+	assert.Equal(t, "world", model.Label)
+}
+
+func TestWrapperValueConversion_NilPBToModel(t *testing.T) {
+	Register[TestWrapperValueModel, TestWrapperValuePB]()
+
+	pb := &TestWrapperValuePB{Name: "nil-wrappers"}
+	model, err := FromPB[TestWrapperValuePB, TestWrapperValueModel](pb)
+	assert.NoError(t, err)
+	assert.NotNil(t, model)
+	assert.False(t, model.IsActive)
+	assert.Equal(t, int32(0), model.Count)
+	assert.Equal(t, 0.0, model.Score)
+	assert.Equal(t, "", model.Label)
+}
+
+func TestMapConversion_ModelToPB(t *testing.T) {
+	Register[TestMapModel, TestMapPB]()
+
+	model := &TestMapModel{Name: "map-test", Metadata: map[string]interface{}{"key1": "val1", "key2": 42, "key3": true}}
+	pb, err := ToPB[TestMapModel, TestMapPB](model)
+	assert.NoError(t, err)
+	assert.NotNil(t, pb)
+	assert.Equal(t, "map-test", pb.Name)
+	assert.Equal(t, "val1", pb.Metadata["key1"])
+	assert.Equal(t, "42", pb.Metadata["key2"])
+	assert.Equal(t, "true", pb.Metadata["key3"])
+}
+
+func TestMapConversion_PBToModel(t *testing.T) {
+	Register[TestMapModel, TestMapPB]()
+
+	pb := &TestMapPB{Name: "map-pb", Metadata: map[string]string{"a": "1", "b": "hello"}}
+	model, err := FromPB[TestMapPB, TestMapModel](pb)
+	assert.NoError(t, err)
+	assert.NotNil(t, model)
+	assert.Equal(t, "map-pb", model.Name)
+	assert.Equal(t, "1", model.Metadata["a"])
+	assert.Equal(t, "hello", model.Metadata["b"])
+}
+
+func TestMapConversion_NilMap(t *testing.T) {
+	Register[TestMapModel, TestMapPB]()
+
+	model := &TestMapModel{Name: "nil-map", Metadata: nil}
+	pb, err := ToPB[TestMapModel, TestMapPB](model)
+	assert.NoError(t, err)
+	assert.NotNil(t, pb)
+	assert.Nil(t, pb.Metadata)
+}
+
 func TestFindConverter_RegisteredTypes(t *testing.T) {
 	Register[TestSimpleModel, TestSimplePB]()
 
