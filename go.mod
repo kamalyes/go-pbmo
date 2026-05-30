@@ -3,8 +3,8 @@ module github.com/kamalyes/go-pbmo
 go 1.25.0
 
 require (
-	github.com/kamalyes/go-argus v0.1.0
-	github.com/kamalyes/go-toolbox v0.15.0
+	github.com/kamalyes/go-argus v0.2.0
+	github.com/kamalyes/go-toolbox v0.15.1-0.20260530121509-82e288ad5fc7
 	github.com/stretchr/testify v1.11.1
 	google.golang.org/protobuf v1.36.11
 )

@@ -15,6 +15,8 @@ package pbmo
 import (
 	"reflect"
 	"sync"
+
+	"github.com/kamalyes/go-toolbox/pkg/types"
 )
 
 // typePair 类型对，用于缓存 key
@@ -200,4 +202,77 @@ func SafeFromPBs[P any, M any](pbs []*P) ([]*M, *BatchResult) {
 // ConverterFor 获取已注册的转换器
 func ConverterFor[M any, P any]() *BidiConverter {
 	return getOrInitConverter[M, P]()
+}
+
+// PBToUpdates 将 PB 消息转换为 map[string]interface{}
+// 遍历 proto 字段，使用 protobuf json tag 名作为 key（snake_case）
+// 自动跳过零值、protobuf 内部字段，自动解包 wrapper 类型
+func PBToUpdates[P any](pb *P) map[string]interface{} {
+	if pb == nil {
+		return map[string]interface{}{}
+	}
+
+	v := reflect.ValueOf(pb).Elem()
+
+	t := v.Type()
+	builder := NewUpdates()
+
+	for i := 0; i < v.NumField(); i++ {
+		fieldVal := v.Field(i)
+		fieldType := t.Field(i)
+
+		if !fieldVal.CanInterface() {
+			continue
+		}
+
+		key := types.ResolvePBKey(fieldType)
+		if key == "" || key == "-" {
+			continue
+		}
+
+		iface := fieldVal.Interface()
+		if isEmptyUpdateValue(iface) {
+			continue
+		}
+
+		builder.Set(key, types.UnwrapPBValue(iface))
+	}
+
+	return builder.Build()
+}
+
+// ModelToUpdates 将 Model 结构体转换为 map[string]interface{}
+// 使用 gorm column tag 或 json tag 作为 key，跳过零值字段和不可导出字段
+func ModelToUpdates[M any](m *M) map[string]interface{} {
+	if m == nil {
+		return map[string]interface{}{}
+	}
+
+	v := reflect.ValueOf(m).Elem()
+
+	t := v.Type()
+	builder := NewUpdates()
+
+	for i := 0; i < v.NumField(); i++ {
+		fieldVal := v.Field(i)
+		fieldType := t.Field(i)
+
+		if !fieldVal.CanInterface() {
+			continue
+		}
+
+		key := types.ResolveModelKey(fieldType)
+		if key == "-" {
+			continue
+		}
+
+		iface := fieldVal.Interface()
+		if isEmptyUpdateValue(iface) {
+			continue
+		}
+
+		builder.Set(key, types.UnwrapModelValue(iface))
+	}
+
+	return builder.Build()
 }
