@@ -2,10 +2,10 @@ github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/google/go-cmp v0.7.0 h1:wk8382ETsv4JYUZwIsn6YpYiWiBsYLSJiTsyBybVuN8=
 github.com/google/go-cmp v0.7.0/go.mod h1:pXiqmnSA92OHEEa9HXL2W4E7lf9JzCmGVUdgjX3N/iU=
-github.com/kamalyes/go-argus v0.2.0 h1:xyH7lbdxTMuTMGrHUyiE9kwCXXWx7UDJeVXXpa8HoDQ=
-github.com/kamalyes/go-argus v0.2.0/go.mod h1:dG5ttCh6wVn1u5qq4NEvoFtibgQ5Bj3PT8rw7HKX8c0=
-github.com/kamalyes/go-toolbox v0.15.2 h1:VqzwbOBzQEgwXMBRtQ4qUxIVE4QXOsNx7JmMsnRNKN8=
-github.com/kamalyes/go-toolbox v0.15.2/go.mod h1:Mepa3KH5/brwYVgxZB7UkiLrSG8loHwfUPAQWRNMJiM=
+github.com/kamalyes/go-argus v0.2.1 h1:OYIrKjNtjbGCBcVKPS1poNCegvgwJYOfXVp/8+x/tiM=
+github.com/kamalyes/go-argus v0.2.1/go.mod h1:dG5ttCh6wVn1u5qq4NEvoFtibgQ5Bj3PT8rw7HKX8c0=
+github.com/kamalyes/go-toolbox v0.15.3 h1:dQbKyFjWq1QaiNcHI37zML0Nla+4z/7iydjjETj7lYE=
+github.com/kamalyes/go-toolbox v0.15.3/go.mod h1:Mepa3KH5/brwYVgxZB7UkiLrSG8loHwfUPAQWRNMJiM=
 github.com/kr/pretty v0.2.0 h1:s5hAObm+yFO5uHYt5dYjxi2rXrsnmRpJx4OYvIWUaQs=
 github.com/kr/pretty v0.2.0/go.mod h1:ipq/a2n7PKx3OHsz4KJII5eveXtPO4qwEXGdVfWzfnI=
 github.com/kr/text v0.2.0 h1:5Nx0Ya0ZqY2ygV366QzturHI13Jq95ApcVaJBhpS+AY=
