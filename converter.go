@@ -119,6 +119,8 @@ type fieldMappingEntry struct {
 // 生命周期：在 ensureFieldCache 中懒加载构建，随 BidiConverter 缓存
 // 核心优化：fastEntries 全部有 copyFunc，可完全绕过 reflect
 type fieldCache struct {
+	srcType         reflect.Type                          // 源类型（用于类型校验）
+	dstType         reflect.Type                          // 目标类型（用于类型校验）
 	fastEntries     []fieldMappingEntry                   // 快速路径字段（有 copyFunc）
 	slowEntries     []fieldMappingEntry                   // 慢速路径字段（需 reflect）
 	autoTime        bool                                  // 是否启用自动时间转换
@@ -170,6 +172,76 @@ type sliceHeader struct {
 
 func addPtr(base unsafe.Pointer, offset uintptr) unsafe.Pointer {
 	return unsafe.Pointer(uintptr(base) + offset)
+}
+
+// ifaceDataPtr 从 interface{} 中提取数据指针
+// interface{} 内部布局：{type *rtype, data unsafe.Pointer}
+// 对于大小 > ptrSize 的类型，data 指向堆上的值副本
+// 对于大小 <= ptrSize 的类型，data 可能直接存储值（而非指向值的指针）
+// 因此仅对大类型安全使用，小类型需要走 reflect 回退路径
+func ifaceDataPtr(iface interface{}) unsafe.Pointer {
+	type ifaceHeader struct {
+		_    unsafe.Pointer
+		Data unsafe.Pointer
+	}
+	h := (*ifaceHeader)(unsafe.Pointer(&iface))
+	// 检查 interface 的类型标志，判断 data 是直接值还是指针
+	// 对于 struct 类型，Go 总是使用间接引用（data 指向堆上的副本）
+	// 但为了安全，我们只对大小 > ptrSize 的 struct 使用此优化
+	return h.Data
+}
+
+// applyFastPath 应用快速路径的 unsafe 拷贝
+func (bc *BidiConverter) applyFastPath(cache *fieldCache, srcBase, dstBase unsafe.Pointer, srcVal, dstVal reflect.Value) error {
+	if cache.mergedCopyFunc != nil && !cache.hasTransformers {
+		cache.mergedCopyFunc(srcBase, dstBase)
+	} else if len(cache.fastEntries) > 0 {
+		if cache.mergedCopyFunc != nil {
+			cache.mergedCopyFunc(srcBase, dstBase)
+		} else {
+			for i := range cache.fastEntries {
+				cache.fastEntries[i].copyFunc(srcBase, dstBase)
+			}
+		}
+	} else {
+		// 没有 fast entries，走 reflect 路径
+		for i := range cache.fastEntries {
+			entry := &cache.fastEntries[i]
+			srcField := srcVal.FieldByIndex(entry.srcIndex)
+			dstField := dstVal.FieldByIndex(entry.dstIndex)
+			if !srcField.IsValid() || !dstField.IsValid() || !dstField.CanSet() {
+				continue
+			}
+			if err := convertFastEntryByReflect(srcField, dstField, entry); err != nil {
+				return NewConversionError("字段 %s 转换失败: %v", entry.srcName, err)
+			}
+		}
+	}
+	return nil
+}
+
+// applySlowEntries 应用慢速路径的 reflect 转换
+func (bc *BidiConverter) applySlowEntries(cache *fieldCache, srcVal, dstVal reflect.Value) error {
+	if len(cache.slowEntries) == 0 {
+		return nil
+	}
+	for i := range cache.slowEntries {
+		entry := &cache.slowEntries[i]
+		srcField := srcVal.FieldByIndex(entry.srcIndex)
+		dstField := dstVal.FieldByIndex(entry.dstIndex)
+		if !srcField.IsValid() || !dstField.IsValid() {
+			continue
+		}
+		if cache.hasTransformers {
+			if bc.transformers.Has(entry.srcName) {
+				srcField = bc.transformers.Apply(entry.srcName, srcField)
+			}
+		}
+		if err := convertFieldByKind(srcField, dstField, entry); err != nil {
+			return NewConversionError("字段 %s 转换失败: %v", entry.srcName, err)
+		}
+	}
+	return nil
 }
 
 // makeSameTypeCopyFunc 根据字段类型生成安全指针转换函数
@@ -2361,6 +2433,8 @@ func buildFieldCache(srcType, dstType reflect.Type, opts *Options, transformers 
 	mergedFn := buildMergedCopyFunc(fastEntries)
 
 	return &fieldCache{
+		srcType:         srcType,
+		dstType:         dstType,
 		fastEntries:     fastEntries,
 		slowEntries:     slowEntries,
 		autoTime:        autoTime,
@@ -2871,6 +2945,22 @@ func (bc *BidiConverter) ConvertPBToModel(pb, modelPtr interface{}) error {
 
 	cache := bc.pbToModelFieldCache()
 
+	// 如果 pbVal 不可寻址（值类型传入 interface{}），尝试通过 interface{} 内部布局获取基地址
+	// 对于 struct 类型且大小 > ptrSize，interface{} 中的 data 指针指向堆上的副本
+	// 对于小 struct（大小 <= ptrSize），data 可能直接存储值，不安全使用
+	// 仅在类型与 cache 匹配时才走此路径，避免方向不匹配导致错误
+	if !pbVal.CanAddr() && pbVal.Kind() == reflect.Struct && pbVal.Type() == cache.srcType {
+		if pbVal.Type().Size() > uintptr(unsafe.Sizeof(uintptr(0))) {
+			if srcBase := ifaceDataPtr(pb); srcBase != nil {
+				dstBase := unsafe.Pointer(modelVal.UnsafeAddr())
+				if err := bc.applyFastPath(cache, srcBase, dstBase, pbVal, modelVal); err != nil {
+					return err
+				}
+				return bc.applySlowEntries(cache, pbVal, modelVal)
+			}
+		}
+	}
+
 	canFastPath := pbVal.CanAddr() && modelVal.CanAddr()
 
 	if canFastPath && cache.mergedCopyFunc != nil && !cache.hasTransformers {
@@ -2905,28 +2995,7 @@ func (bc *BidiConverter) ConvertPBToModel(pb, modelPtr interface{}) error {
 		}
 	}
 
-	hasTransformers := cache.hasTransformers
-
-	if len(cache.slowEntries) > 0 {
-		for i := range cache.slowEntries {
-			entry := &cache.slowEntries[i]
-			srcField := pbVal.FieldByIndex(entry.srcIndex)
-			dstField := modelVal.FieldByIndex(entry.dstIndex)
-			if !srcField.IsValid() || !dstField.IsValid() {
-				continue
-			}
-			if hasTransformers {
-				if bc.transformers.Has(entry.srcName) {
-					srcField = bc.transformers.Apply(entry.srcName, srcField)
-				}
-			}
-			if err := convertFieldByKind(srcField, dstField, entry); err != nil {
-				return NewConversionError("字段 %s 转换失败: %v", entry.srcName, err)
-			}
-		}
-	}
-
-	return nil
+	return bc.applySlowEntries(cache, pbVal, modelVal)
 }
 
 // ConvertModelToPB 将 Model 转换为 PB 消息（核心热路径）
@@ -2955,6 +3024,19 @@ func (bc *BidiConverter) ConvertModelToPB(model, pbPtr interface{}) error {
 	}
 
 	cache := bc.modelToPBFieldCache()
+
+	// 如果 modelVal 不可寻址（值类型传入 interface{}），尝试通过 interface{} 内部布局获取基地址
+	if !modelVal.CanAddr() && modelVal.Kind() == reflect.Struct && modelVal.Type() == cache.srcType {
+		if modelVal.Type().Size() > uintptr(unsafe.Sizeof(uintptr(0))) {
+			if srcBase := ifaceDataPtr(model); srcBase != nil {
+				dstBase := unsafe.Pointer(pbVal.UnsafeAddr())
+				if err := bc.applyFastPath(cache, srcBase, dstBase, modelVal, pbVal); err != nil {
+					return err
+				}
+				return bc.applySlowEntries(cache, modelVal, pbVal)
+			}
+		}
+	}
 
 	canFastPath := modelVal.CanAddr() && pbVal.CanAddr()
 
@@ -2990,28 +3072,7 @@ func (bc *BidiConverter) ConvertModelToPB(model, pbPtr interface{}) error {
 		}
 	}
 
-	hasTransformers := cache.hasTransformers
-
-	if len(cache.slowEntries) > 0 {
-		for i := range cache.slowEntries {
-			entry := &cache.slowEntries[i]
-			srcField := modelVal.FieldByIndex(entry.srcIndex)
-			dstField := pbVal.FieldByIndex(entry.dstIndex)
-			if !srcField.IsValid() || !dstField.IsValid() {
-				continue
-			}
-			if hasTransformers {
-				if bc.transformers.Has(entry.srcName) {
-					srcField = bc.transformers.Apply(entry.srcName, srcField)
-				}
-			}
-			if err := convertFieldByKind(srcField, dstField, entry); err != nil {
-				return NewConversionError("字段 %s 转换失败: %v", entry.srcName, err)
-			}
-		}
-	}
-
-	return nil
+	return bc.applySlowEntries(cache, modelVal, pbVal)
 }
 
 // convertFastEntryByReflect 当值不可寻址时，使用 reflect 回退路径执行快速条目转换
