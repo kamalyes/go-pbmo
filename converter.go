@@ -159,6 +159,15 @@ type structFieldTypePair [2]reflect.Type
 // 避免每次嵌套转换时重复构建字段映射，提升性能
 var globalStructFieldCache sync.Map
 
+// sliceHeader 替代 sliceHeader，使用 unsafe.Pointer 避免 go vet 警告
+// sliceHeader.Data 是 uintptr 类型，转换为 unsafe.Pointer 会触发 vet 警告
+// 自定义 header 使用 unsafe.Pointer.Data，与运行时切片布局一致
+type sliceHeader struct {
+	Data unsafe.Pointer
+	Len  int
+	Cap  int
+}
+
 func addPtr(base unsafe.Pointer, offset uintptr) unsafe.Pointer {
 	return unsafe.Pointer(uintptr(base) + offset)
 }
@@ -847,6 +856,8 @@ func makeFieldCopyFunc(kind fieldKind, srcType, dstType reflect.Type, srcOffset,
 		return makeStructCopyFunc(srcType, dstType, srcOffset, dstOffset)
 	case fieldSlice:
 		return makeSliceCopyFunc(srcType, dstType, srcOffset, dstOffset)
+	case fieldMap:
+		return makeMapCopyFunc(srcType, dstType, srcOffset, dstOffset)
 	}
 	return nil
 }
@@ -1004,24 +1015,24 @@ func makeSliceCopyFunc(srcType, dstType reflect.Type, srcOffset, dstOffset uintp
 		srcElemSize := srcElemType.Size()
 		dstElemSize := dstElemType.Size()
 		return func(srcBase, dstBase unsafe.Pointer) {
-			srcSlice := *(*reflect.SliceHeader)(addPtr(srcBase, srcOffset))
+			srcSlice := *(*sliceHeader)(addPtr(srcBase, srcOffset))
 			if srcSlice.Len == 0 {
 				dstSlice := reflect.MakeSlice(dstType, 0, 0)
-				*(*reflect.SliceHeader)(addPtr(dstBase, dstOffset)) = reflect.SliceHeader{
-					Data: uintptr(dstSlice.UnsafePointer()), Len: 0, Cap: 0,
+				*(*sliceHeader)(addPtr(dstBase, dstOffset)) = sliceHeader{
+					Data: dstSlice.UnsafePointer(), Len: 0, Cap: 0,
 				}
 				return
 			}
 			dstSlice := reflect.MakeSlice(dstType, srcSlice.Len, srcSlice.Len)
-			srcData := unsafe.Pointer(srcSlice.Data)
+			srcData := srcSlice.Data
 			dstData := dstSlice.UnsafePointer()
 			for i := 0; i < srcSlice.Len; i++ {
 				srcAddr := addPtr(srcData, uintptr(i)*srcElemSize)
 				dstAddr := addPtr(dstData, uintptr(i)*dstElemSize)
 				convertIntegerValue(srcAddr, dstAddr, srcElemKind, dstElemKind)
 			}
-			*(*reflect.SliceHeader)(addPtr(dstBase, dstOffset)) = reflect.SliceHeader{
-				Data: uintptr(dstSlice.UnsafePointer()), Len: srcSlice.Len, Cap: srcSlice.Len,
+			*(*sliceHeader)(addPtr(dstBase, dstOffset)) = sliceHeader{
+				Data: dstSlice.UnsafePointer(), Len: srcSlice.Len, Cap: srcSlice.Len,
 			}
 		}
 	}
@@ -1031,23 +1042,23 @@ func makeSliceCopyFunc(srcType, dstType reflect.Type, srcOffset, dstOffset uintp
 		srcElemSize := srcElemType.Size()
 		needConvert := srcElemType != dstElemType
 		return func(srcBase, dstBase unsafe.Pointer) {
-			srcSlice := *(*reflect.SliceHeader)(addPtr(srcBase, srcOffset))
+			srcSlice := *(*sliceHeader)(addPtr(srcBase, srcOffset))
 			if srcSlice.Len == 0 {
 				dstSlice := reflect.MakeSlice(dstType, 0, 0)
-				*(*reflect.SliceHeader)(addPtr(dstBase, dstOffset)) = reflect.SliceHeader{
-					Data: uintptr(dstSlice.UnsafePointer()), Len: 0, Cap: 0,
+				*(*sliceHeader)(addPtr(dstBase, dstOffset)) = sliceHeader{
+					Data: dstSlice.UnsafePointer(), Len: 0, Cap: 0,
 				}
 				return
 			}
 			dstSlice := reflect.MakeSlice(dstType, srcSlice.Len, srcSlice.Len)
 			if needConvert {
-				srcData := unsafe.Pointer(srcSlice.Data)
+				srcData := srcSlice.Data
 				for i := 0; i < srcSlice.Len; i++ {
 					srcElem := reflect.NewAt(srcElemType, addPtr(srcData, uintptr(i)*srcElemSize)).Elem()
 					dstSlice.Index(i).Set(srcElem.Convert(dstElemType))
 				}
 			} else {
-				srcData := unsafe.Pointer(srcSlice.Data)
+				srcData := srcSlice.Data
 				dstData := dstSlice.UnsafePointer()
 				elemSize := srcElemSize
 				for i := 0; i < srcSlice.Len; i++ {
@@ -1056,16 +1067,18 @@ func makeSliceCopyFunc(srcType, dstType reflect.Type, srcOffset, dstOffset uintp
 					copy((*[1 << 28]byte)(dstAddr)[:elemSize], (*[1 << 28]byte)(srcAddr)[:elemSize])
 				}
 			}
-			*(*reflect.SliceHeader)(addPtr(dstBase, dstOffset)) = reflect.SliceHeader{
-				Data: uintptr(dstSlice.UnsafePointer()), Len: srcSlice.Len, Cap: srcSlice.Len,
+			*(*sliceHeader)(addPtr(dstBase, dstOffset)) = sliceHeader{
+				Data: dstSlice.UnsafePointer(), Len: srcSlice.Len, Cap: srcSlice.Len,
 			}
 		}
 	}
 
 	// 策略 3：元素为 *Struct 指针 → 使用 structFieldCache 做元素级 unsafe 快速转换
+	// 优化：使用连续内存批量分配（backing slice），将 N+1 次分配减少到 2 次
 	if elemKind == fieldStructPtr {
 		srcInnerType := srcElemType.Elem()
 		dstInnerType := dstElemType.Elem()
+		dstInnerSize := dstInnerType.Size()
 		subCache, ok := globalStructFieldCache.Load(structFieldTypePair{srcInnerType, dstInnerType})
 		if !ok {
 			subCache = buildStructFieldCache(srcInnerType, dstInnerType, true)
@@ -1077,64 +1090,70 @@ func makeSliceCopyFunc(srcType, dstType reflect.Type, srcOffset, dstOffset uintp
 			fastFns[i] = sc.fastEntries[i].copyFunc
 		}
 		hasSlowEntries := len(sc.slowEntries) > 0
+		backingSliceType := reflect.SliceOf(dstInnerType)
 
 		if !hasSlowEntries && len(fastFns) > 0 {
 			return func(srcBase, dstBase unsafe.Pointer) {
-				srcSlice := *(*reflect.SliceHeader)(addPtr(srcBase, srcOffset))
+				srcSlice := *(*sliceHeader)(addPtr(srcBase, srcOffset))
 				if srcSlice.Len == 0 {
 					dstSlice := reflect.MakeSlice(dstType, 0, 0)
-					*(*reflect.SliceHeader)(addPtr(dstBase, dstOffset)) = reflect.SliceHeader{
-						Data: uintptr(dstSlice.UnsafePointer()), Len: 0, Cap: 0,
+					*(*sliceHeader)(addPtr(dstBase, dstOffset)) = sliceHeader{
+						Data: dstSlice.UnsafePointer(), Len: 0, Cap: 0,
 					}
 					return
 				}
+				// 批量分配：一次分配所有元素 + 一次分配指针切片
+				backing := reflect.MakeSlice(backingSliceType, srcSlice.Len, srcSlice.Len)
 				dstSlice := reflect.MakeSlice(dstType, srcSlice.Len, srcSlice.Len)
-				srcData := unsafe.Pointer(srcSlice.Data)
+				srcData := srcSlice.Data
+				dstData := dstSlice.UnsafePointer()
+				backingData := backing.UnsafePointer()
 				for i := 0; i < srcSlice.Len; i++ {
 					srcPtr := *(*unsafe.Pointer)(addPtr(srcData, uintptr(i)*PtrSize))
 					if srcPtr == nil {
-						dstSlice.Index(i).Set(reflect.Zero(dstElemType))
+						*(*unsafe.Pointer)(addPtr(dstData, uintptr(i)*PtrSize)) = nil
 						continue
 					}
-					dstPtrVal := reflect.New(dstInnerType)
-					dstPtr := dstPtrVal.UnsafePointer()
+					// 直接在 backing slice 中定位元素地址，无需 reflect.New
+					dstElemPtr := addPtr(backingData, uintptr(i)*dstInnerSize)
 					for j := range fastFns {
-						fastFns[j](srcPtr, dstPtr)
+						fastFns[j](srcPtr, dstElemPtr)
 					}
-					dstSlice.Index(i).Set(dstPtrVal)
+					*(*unsafe.Pointer)(addPtr(dstData, uintptr(i)*PtrSize)) = dstElemPtr
 				}
-				*(*reflect.SliceHeader)(addPtr(dstBase, dstOffset)) = reflect.SliceHeader{
-					Data: uintptr(dstSlice.UnsafePointer()), Len: srcSlice.Len, Cap: srcSlice.Len,
+				*(*sliceHeader)(addPtr(dstBase, dstOffset)) = sliceHeader{
+					Data: dstSlice.UnsafePointer(), Len: srcSlice.Len, Cap: srcSlice.Len,
 				}
 			}
 		}
 
 		if len(fastFns) > 0 {
 			return func(srcBase, dstBase unsafe.Pointer) {
-				srcSlice := *(*reflect.SliceHeader)(addPtr(srcBase, srcOffset))
+				srcSlice := *(*sliceHeader)(addPtr(srcBase, srcOffset))
 				if srcSlice.Len == 0 {
 					dstSlice := reflect.MakeSlice(dstType, 0, 0)
-					*(*reflect.SliceHeader)(addPtr(dstBase, dstOffset)) = reflect.SliceHeader{
-						Data: uintptr(dstSlice.UnsafePointer()), Len: 0, Cap: 0,
+					*(*sliceHeader)(addPtr(dstBase, dstOffset)) = sliceHeader{
+						Data: dstSlice.UnsafePointer(), Len: 0, Cap: 0,
 					}
 					return
 				}
+				backing := reflect.MakeSlice(backingSliceType, srcSlice.Len, srcSlice.Len)
 				dstSlice := reflect.MakeSlice(dstType, srcSlice.Len, srcSlice.Len)
-				srcData := unsafe.Pointer(srcSlice.Data)
-				srcSliceVal := reflect.NewAt(srcType, addPtr(srcBase, srcOffset)).Elem()
+				srcData := srcSlice.Data
+				dstData := dstSlice.UnsafePointer()
+				backingData := backing.UnsafePointer()
 				for i := 0; i < srcSlice.Len; i++ {
 					srcPtr := *(*unsafe.Pointer)(addPtr(srcData, uintptr(i)*PtrSize))
 					if srcPtr == nil {
-						dstSlice.Index(i).Set(reflect.Zero(dstElemType))
+						*(*unsafe.Pointer)(addPtr(dstData, uintptr(i)*PtrSize)) = nil
 						continue
 					}
-					dstPtrVal := reflect.New(dstInnerType)
-					dstPtr := dstPtrVal.UnsafePointer()
+					dstElemPtr := addPtr(backingData, uintptr(i)*dstInnerSize)
 					for j := range fastFns {
-						fastFns[j](srcPtr, dstPtr)
+						fastFns[j](srcPtr, dstElemPtr)
 					}
-					dstElemVal := dstPtrVal.Elem()
-					srcElemVal := srcSliceVal.Index(i).Elem()
+					srcElemVal := reflect.NewAt(srcInnerType, srcPtr).Elem()
+					dstElemVal := reflect.NewAt(dstInnerType, dstElemPtr).Elem()
 					for j := range sc.slowEntries {
 						entry := &sc.slowEntries[j]
 						s := srcElemVal.FieldByIndex(entry.srcIndex)
@@ -1144,10 +1163,10 @@ func makeSliceCopyFunc(srcType, dstType reflect.Type, srcOffset, dstOffset uintp
 						}
 						convertStructFieldSlow(s, d, entry)
 					}
-					dstSlice.Index(i).Set(dstPtrVal)
+					*(*unsafe.Pointer)(addPtr(dstData, uintptr(i)*PtrSize)) = dstElemPtr
 				}
-				*(*reflect.SliceHeader)(addPtr(dstBase, dstOffset)) = reflect.SliceHeader{
-					Data: uintptr(dstSlice.UnsafePointer()), Len: srcSlice.Len, Cap: srcSlice.Len,
+				*(*sliceHeader)(addPtr(dstBase, dstOffset)) = sliceHeader{
+					Data: dstSlice.UnsafePointer(), Len: srcSlice.Len, Cap: srcSlice.Len,
 				}
 			}
 		}
@@ -1171,16 +1190,16 @@ func makeSliceCopyFunc(srcType, dstType reflect.Type, srcOffset, dstOffset uintp
 
 		if !hasSlowEntries && len(fastFns) > 0 {
 			return func(srcBase, dstBase unsafe.Pointer) {
-				srcSlice := *(*reflect.SliceHeader)(addPtr(srcBase, srcOffset))
+				srcSlice := *(*sliceHeader)(addPtr(srcBase, srcOffset))
 				if srcSlice.Len == 0 {
 					dstSlice := reflect.MakeSlice(dstType, 0, 0)
-					*(*reflect.SliceHeader)(addPtr(dstBase, dstOffset)) = reflect.SliceHeader{
-						Data: uintptr(dstSlice.UnsafePointer()), Len: 0, Cap: 0,
+					*(*sliceHeader)(addPtr(dstBase, dstOffset)) = sliceHeader{
+						Data: dstSlice.UnsafePointer(), Len: 0, Cap: 0,
 					}
 					return
 				}
 				dstSlice := reflect.MakeSlice(dstType, srcSlice.Len, srcSlice.Len)
-				srcData := unsafe.Pointer(srcSlice.Data)
+				srcData := srcSlice.Data
 				dstData := dstSlice.UnsafePointer()
 				srcElemSize := srcElemType.Size()
 				dstElemSize := dstElemType.Size()
@@ -1191,24 +1210,24 @@ func makeSliceCopyFunc(srcType, dstType reflect.Type, srcOffset, dstOffset uintp
 						fastFns[j](srcElemPtr, dstElemPtr)
 					}
 				}
-				*(*reflect.SliceHeader)(addPtr(dstBase, dstOffset)) = reflect.SliceHeader{
-					Data: uintptr(dstSlice.UnsafePointer()), Len: srcSlice.Len, Cap: srcSlice.Len,
+				*(*sliceHeader)(addPtr(dstBase, dstOffset)) = sliceHeader{
+					Data: dstSlice.UnsafePointer(), Len: srcSlice.Len, Cap: srcSlice.Len,
 				}
 			}
 		}
 
 		if len(fastFns) > 0 {
 			return func(srcBase, dstBase unsafe.Pointer) {
-				srcSlice := *(*reflect.SliceHeader)(addPtr(srcBase, srcOffset))
+				srcSlice := *(*sliceHeader)(addPtr(srcBase, srcOffset))
 				if srcSlice.Len == 0 {
 					dstSlice := reflect.MakeSlice(dstType, 0, 0)
-					*(*reflect.SliceHeader)(addPtr(dstBase, dstOffset)) = reflect.SliceHeader{
-						Data: uintptr(dstSlice.UnsafePointer()), Len: 0, Cap: 0,
+					*(*sliceHeader)(addPtr(dstBase, dstOffset)) = sliceHeader{
+						Data: dstSlice.UnsafePointer(), Len: 0, Cap: 0,
 					}
 					return
 				}
 				dstSlice := reflect.MakeSlice(dstType, srcSlice.Len, srcSlice.Len)
-				srcData := unsafe.Pointer(srcSlice.Data)
+				srcData := srcSlice.Data
 				dstData := dstSlice.UnsafePointer()
 				srcElemSize := srcElemType.Size()
 				dstElemSize := dstElemType.Size()
@@ -1230,8 +1249,8 @@ func makeSliceCopyFunc(srcType, dstType reflect.Type, srcOffset, dstOffset uintp
 						convertStructFieldSlow(s, d, entry)
 					}
 				}
-				*(*reflect.SliceHeader)(addPtr(dstBase, dstOffset)) = reflect.SliceHeader{
-					Data: uintptr(dstSlice.UnsafePointer()), Len: srcSlice.Len, Cap: srcSlice.Len,
+				*(*sliceHeader)(addPtr(dstBase, dstOffset)) = sliceHeader{
+					Data: dstSlice.UnsafePointer(), Len: srcSlice.Len, Cap: srcSlice.Len,
 				}
 			}
 		}
@@ -1245,51 +1264,163 @@ func makeSliceCopyFunc(srcType, dstType reflect.Type, srcOffset, dstOffset uintp
 		if elemCopyFn == nil {
 			return nil
 		}
+		srcElemSize := srcElemType.Size()
+		dstElemSize := dstElemType.Size()
 		return func(srcBase, dstBase unsafe.Pointer) {
-			srcSlice := *(*reflect.SliceHeader)(addPtr(srcBase, srcOffset))
+			srcSlice := *(*sliceHeader)(addPtr(srcBase, srcOffset))
 			if srcSlice.Len == 0 {
 				dstSlice := reflect.MakeSlice(dstType, 0, 0)
-				*(*reflect.SliceHeader)(addPtr(dstBase, dstOffset)) = reflect.SliceHeader{
-					Data: uintptr(dstSlice.UnsafePointer()), Len: 0, Cap: 0,
+				*(*sliceHeader)(addPtr(dstBase, dstOffset)) = sliceHeader{
+					Data: dstSlice.UnsafePointer(), Len: 0, Cap: 0,
 				}
 				return
 			}
 			dstSlice := reflect.MakeSlice(dstType, srcSlice.Len, srcSlice.Len)
-			srcSliceVal := reflect.NewAt(srcType, addPtr(srcBase, srcOffset)).Elem()
-			dstSliceVal := reflect.NewAt(dstType, addPtr(dstBase, dstOffset)).Elem()
-			dstSliceVal.Set(dstSlice)
+			srcData := srcSlice.Data
+			dstData := dstSlice.UnsafePointer()
 			for i := 0; i < srcSlice.Len; i++ {
-				srcElem := srcSliceVal.Index(i)
-				dstElem := dstSliceVal.Index(i)
-				// 元素级转换需要 reflect.Value，使用 Set
-				elemCopyFn(unsafe.Pointer(srcElem.UnsafeAddr()), unsafe.Pointer(dstElem.UnsafeAddr()))
+				srcElemPtr := addPtr(srcData, uintptr(i)*srcElemSize)
+				dstElemPtr := addPtr(dstData, uintptr(i)*dstElemSize)
+				elemCopyFn(srcElemPtr, dstElemPtr)
 			}
-			// dstSlice 已通过 Index 直接写入，无需重新写入 header
+			*(*sliceHeader)(addPtr(dstBase, dstOffset)) = sliceHeader{
+				Data: dstSlice.UnsafePointer(), Len: srcSlice.Len, Cap: srcSlice.Len,
+			}
 		}
 	}
 
 	// 策略 6：时间戳→时间、时间→时间戳等元素转换
 	if elemKind == fieldTSToTime || elemKind == fieldTimeToTS || elemKind == fieldWrapper {
-		// 这些元素转换需要 reflect 操作，无法 unsafe 化
-		// 但可以优化循环：避免 convertSlice 的通用路径，直接特化循环
 		srcElemSize := srcElemType.Size()
+		dstElemSize := dstElemType.Size()
 		return func(srcBase, dstBase unsafe.Pointer) {
-			srcSlice := *(*reflect.SliceHeader)(addPtr(srcBase, srcOffset))
+			srcSlice := *(*sliceHeader)(addPtr(srcBase, srcOffset))
 			if srcSlice.Len == 0 {
 				dstSlice := reflect.MakeSlice(dstType, 0, 0)
-				*(*reflect.SliceHeader)(addPtr(dstBase, dstOffset)) = reflect.SliceHeader{
-					Data: uintptr(dstSlice.UnsafePointer()), Len: 0, Cap: 0,
+				*(*sliceHeader)(addPtr(dstBase, dstOffset)) = sliceHeader{
+					Data: dstSlice.UnsafePointer(), Len: 0, Cap: 0,
 				}
 				return
 			}
 			dstSlice := reflect.MakeSlice(dstType, srcSlice.Len, srcSlice.Len)
-			srcData := unsafe.Pointer(srcSlice.Data)
+			srcData := srcSlice.Data
+			dstData := dstSlice.UnsafePointer()
 			for i := 0; i < srcSlice.Len; i++ {
 				srcElem := reflect.NewAt(srcElemType, addPtr(srcData, uintptr(i)*srcElemSize)).Elem()
-				dstSlice.Index(i).Set(srcElem.Convert(dstElemType))
+				converted := srcElem.Convert(dstElemType)
+				dstElemPtr := addPtr(dstData, uintptr(i)*dstElemSize)
+				reflect.NewAt(dstElemType, dstElemPtr).Elem().Set(converted)
 			}
-			*(*reflect.SliceHeader)(addPtr(dstBase, dstOffset)) = reflect.SliceHeader{
-				Data: uintptr(dstSlice.UnsafePointer()), Len: srcSlice.Len, Cap: srcSlice.Len,
+			*(*sliceHeader)(addPtr(dstBase, dstOffset)) = sliceHeader{
+				Data: dstSlice.UnsafePointer(), Len: srcSlice.Len, Cap: srcSlice.Len,
+			}
+		}
+	}
+
+	return nil
+}
+
+// makeMapCopyFunc 生成 map 转换的 unsafe 闭包（map[K1]V1 → map[K2]V2）
+// 优化策略：
+//  1. key 类型相同 + value 类型相同 → 直接赋值（map 内部是指针，浅拷贝即可）
+//  2. key 可转换 + value 可转换 → 遍历 + Convert
+//  3. key 相同 + value 为结构体 → 遍历 + structFieldCache
+//  4. 其他 → 返回 nil 走 reflect 慢路径
+func makeMapCopyFunc(srcType, dstType reflect.Type, srcOffset, dstOffset uintptr) fieldCopyFunc {
+	srcKeyType := srcType.Key()
+	dstKeyType := dstType.Key()
+	srcValType := srcType.Elem()
+	dstValType := dstType.Elem()
+
+	// 策略 1：key 和 value 类型都相同 → map 本身是指针，直接赋值
+	if srcKeyType == dstKeyType && srcValType == dstValType {
+		return func(srcBase, dstBase unsafe.Pointer) {
+			srcMap := *(*unsafe.Pointer)(addPtr(srcBase, srcOffset))
+			*(*unsafe.Pointer)(addPtr(dstBase, dstOffset)) = srcMap
+		}
+	}
+
+	// 策略 2：key 和 value 都可直接 Convert → 遍历 + Convert
+	keyConvertible := srcKeyType != dstKeyType && srcKeyType.ConvertibleTo(dstKeyType)
+	valConvertible := srcValType != dstValType && srcValType.ConvertibleTo(dstValType)
+	keySame := srcKeyType == dstKeyType
+	valSame := srcValType == dstValType
+
+	if (keySame || keyConvertible) && (valSame || valConvertible) {
+		return func(srcBase, dstBase unsafe.Pointer) {
+			srcMapVal := reflect.NewAt(srcType, addPtr(srcBase, srcOffset)).Elem()
+			if srcMapVal.IsNil() {
+				*(*unsafe.Pointer)(addPtr(dstBase, dstOffset)) = nil
+				return
+			}
+			dstMap := reflect.MakeMapWithSize(dstType, srcMapVal.Len())
+			iter := srcMapVal.MapRange()
+			for iter.Next() {
+				srcKey := iter.Key()
+				srcVal := iter.Value()
+				dstKey := srcKey
+				if !keySame {
+					dstKey = srcKey.Convert(dstKeyType)
+				}
+				dstVal := srcVal
+				if !valSame {
+					dstVal = srcVal.Convert(dstValType)
+				}
+				dstMap.SetMapIndex(dstKey, dstVal)
+			}
+			dstMapVal := reflect.NewAt(dstType, addPtr(dstBase, dstOffset)).Elem()
+			dstMapVal.Set(dstMap)
+		}
+	}
+
+	// 策略 3：key 相同 + value 为结构体 → 使用 structFieldCache
+	if keySame && srcValType.Kind() == reflect.Struct && dstValType.Kind() == reflect.Struct {
+		subCache, ok := globalStructFieldCache.Load(structFieldTypePair{srcValType, dstValType})
+		if !ok {
+			subCache = buildStructFieldCache(srcValType, dstValType, true)
+			globalStructFieldCache.Store(structFieldTypePair{srcValType, dstValType}, subCache)
+		}
+		sc := subCache.(*structFieldCache)
+		fastFns := make([]fieldCopyFunc, len(sc.fastEntries))
+		for i := range sc.fastEntries {
+			fastFns[i] = sc.fastEntries[i].copyFunc
+		}
+		needSubConvert := len(sc.slowEntries) > 0
+
+		if len(fastFns) > 0 {
+			return func(srcBase, dstBase unsafe.Pointer) {
+				srcMapVal := reflect.NewAt(srcType, addPtr(srcBase, srcOffset)).Elem()
+				if srcMapVal.IsNil() {
+					*(*unsafe.Pointer)(addPtr(dstBase, dstOffset)) = nil
+					return
+				}
+				dstMap := reflect.MakeMapWithSize(dstType, srcMapVal.Len())
+				iter := srcMapVal.MapRange()
+				for iter.Next() {
+					srcKey := iter.Key()
+					srcValPtr := iter.Value().Addr().UnsafePointer()
+					dstVal := reflect.New(dstValType)
+					dstValPtr := dstVal.UnsafePointer()
+					for i := range fastFns {
+						fastFns[i](srcValPtr, dstValPtr)
+					}
+					if needSubConvert {
+						srcElemVal := reflect.NewAt(srcValType, srcValPtr).Elem()
+						dstElemVal := dstVal.Elem()
+						for i := range sc.slowEntries {
+							entry := &sc.slowEntries[i]
+							s := srcElemVal.FieldByIndex(entry.srcIndex)
+							d := dstElemVal.FieldByIndex(entry.dstIndex)
+							if !s.IsValid() || !d.IsValid() {
+								continue
+							}
+							convertStructFieldSlow(s, d, entry)
+						}
+					}
+					dstMap.SetMapIndex(srcKey, dstVal.Elem())
+				}
+				dstMapVal := reflect.NewAt(dstType, addPtr(dstBase, dstOffset)).Elem()
+				dstMapVal.Set(dstMap)
 			}
 		}
 	}
@@ -1705,6 +1836,56 @@ func makeToPtrCopyFunc(srcType, dstType reflect.Type, srcOffset, dstOffset uintp
 		}
 	}
 
+	// Case 2: Different struct types (StructA → *StructB)，使用 structFieldCache
+	if srcType.Kind() == reflect.Struct && elemType.Kind() == reflect.Struct {
+		subCache, ok := globalStructFieldCache.Load(structFieldTypePair{srcType, elemType})
+		if !ok {
+			subCache = buildStructFieldCache(srcType, elemType, true)
+			globalStructFieldCache.Store(structFieldTypePair{srcType, elemType}, subCache)
+		}
+		sc := subCache.(*structFieldCache)
+		fastFns := make([]fieldCopyFunc, len(sc.fastEntries))
+		for i := range sc.fastEntries {
+			fastFns[i] = sc.fastEntries[i].copyFunc
+		}
+		needSubConvert := len(sc.slowEntries) > 0
+
+		if !needSubConvert && len(fastFns) > 0 {
+			return func(srcBase, dstBase unsafe.Pointer) {
+				srcAddr := addPtr(srcBase, srcOffset)
+				dstPtrVal := reflect.New(elemType)
+				dstPtr := dstPtrVal.UnsafePointer()
+				for i := range fastFns {
+					fastFns[i](srcAddr, dstPtr)
+				}
+				*(*unsafe.Pointer)(addPtr(dstBase, dstOffset)) = dstPtr
+			}
+		}
+
+		if len(fastFns) > 0 {
+			return func(srcBase, dstBase unsafe.Pointer) {
+				srcAddr := addPtr(srcBase, srcOffset)
+				dstPtrVal := reflect.New(elemType)
+				dstPtr := dstPtrVal.UnsafePointer()
+				for i := range fastFns {
+					fastFns[i](srcAddr, dstPtr)
+				}
+				srcVal := reflect.NewAt(srcType, srcAddr).Elem()
+				dstVal := dstPtrVal.Elem()
+				for i := range sc.slowEntries {
+					entry := &sc.slowEntries[i]
+					s := srcVal.FieldByIndex(entry.srcIndex)
+					d := dstVal.FieldByIndex(entry.dstIndex)
+					if !s.IsValid() || !d.IsValid() {
+						continue
+					}
+					convertStructFieldSlow(s, d, entry)
+				}
+				*(*unsafe.Pointer)(addPtr(dstBase, dstOffset)) = dstPtr
+			}
+		}
+	}
+
 	return nil
 }
 
@@ -1713,18 +1894,73 @@ func makeToPtrCopyFunc(srcType, dstType reflect.Type, srcOffset, dstOffset uintp
 // 仅当 srcType.Elem() == dstType（解引用后类型相同）时生成，否则返回 nil 走 reflect
 func makeFromPtrCopyFunc(srcType, dstType reflect.Type, srcOffset, dstOffset uintptr) fieldCopyFunc {
 	elemType := srcType.Elem()
-	if dstType != elemType {
-		return nil
-	}
-	elemSize := dstType.Size()
-	return func(srcBase, dstBase unsafe.Pointer) {
-		srcPtr := *(*unsafe.Pointer)(addPtr(srcBase, srcOffset))
-		if srcPtr == nil {
-			return
+
+	// Case 1: Same type after dereference (*T → T)，直接内存拷贝
+	if dstType == elemType {
+		elemSize := dstType.Size()
+		return func(srcBase, dstBase unsafe.Pointer) {
+			srcPtr := *(*unsafe.Pointer)(addPtr(srcBase, srcOffset))
+			if srcPtr == nil {
+				return
+			}
+			copy((*[1 << 30]byte)(addPtr(dstBase, dstOffset))[:elemSize],
+				(*[1 << 30]byte)(srcPtr)[:elemSize])
 		}
-		copy((*[1 << 30]byte)(addPtr(dstBase, dstOffset))[:elemSize],
-			(*[1 << 30]byte)(srcPtr)[:elemSize])
 	}
+
+	// Case 2: Different struct types (*StructA → StructB)，使用 structFieldCache
+	if elemType.Kind() == reflect.Struct && dstType.Kind() == reflect.Struct {
+		subCache, ok := globalStructFieldCache.Load(structFieldTypePair{elemType, dstType})
+		if !ok {
+			subCache = buildStructFieldCache(elemType, dstType, true)
+			globalStructFieldCache.Store(structFieldTypePair{elemType, dstType}, subCache)
+		}
+		sc := subCache.(*structFieldCache)
+		fastFns := make([]fieldCopyFunc, len(sc.fastEntries))
+		for i := range sc.fastEntries {
+			fastFns[i] = sc.fastEntries[i].copyFunc
+		}
+		needSubConvert := len(sc.slowEntries) > 0
+
+		if !needSubConvert && len(fastFns) > 0 {
+			return func(srcBase, dstBase unsafe.Pointer) {
+				srcPtr := *(*unsafe.Pointer)(addPtr(srcBase, srcOffset))
+				if srcPtr == nil {
+					return
+				}
+				dstAddr := addPtr(dstBase, dstOffset)
+				for i := range fastFns {
+					fastFns[i](srcPtr, dstAddr)
+				}
+			}
+		}
+
+		if len(fastFns) > 0 {
+			return func(srcBase, dstBase unsafe.Pointer) {
+				srcPtr := *(*unsafe.Pointer)(addPtr(srcBase, srcOffset))
+				if srcPtr == nil {
+					return
+				}
+				dstAddr := addPtr(dstBase, dstOffset)
+				for i := range fastFns {
+					fastFns[i](srcPtr, dstAddr)
+				}
+				srcVal := reflect.NewAt(elemType, srcPtr).Elem()
+				dstVal := reflect.NewAt(dstType, dstAddr).Elem()
+				for i := range sc.slowEntries {
+					entry := &sc.slowEntries[i]
+					s := srcVal.FieldByIndex(entry.srcIndex)
+					d := dstVal.FieldByIndex(entry.dstIndex)
+					if !s.IsValid() || !d.IsValid() {
+						continue
+					}
+					convertStructFieldSlow(s, d, entry)
+				}
+			}
+		}
+	}
+
+	return nil
 }
 
 // makeStringFallbackCopyFunc 生成 字符串命名类型转换的 unsafe 闭包
@@ -1828,6 +2064,18 @@ func classifyField(srcType, dstType reflect.Type, autoTime bool) (fieldKind, *wr
 	if srcType.ConvertibleTo(dstType) {
 		if IsIntegerType(srcType) && IsIntegerType(dstType) {
 			return fieldInteger, nil, 0
+		}
+		// 可转换的结构体指针/值类型优先走 fieldStructPtr/fieldStruct
+		// 这样可以利用 structFieldCache 进行 unsafe 快速转换，而非 reflect.Convert
+		srcIsPtr, dstIsPtr := srcKind == reflect.Ptr, dstKind == reflect.Ptr
+		if srcIsPtr && dstIsPtr {
+			srcElem := srcType.Elem()
+			dstElem := dstType.Elem()
+			if srcElem.Kind() == reflect.Struct && dstElem.Kind() == reflect.Struct {
+				return fieldStructPtr, nil, 0
+			}
+		} else if !srcIsPtr && !dstIsPtr && srcKind == reflect.Struct && dstKind == reflect.Struct {
+			return fieldStruct, nil, 0
 		}
 		return fieldConvertible, nil, 0
 	}
