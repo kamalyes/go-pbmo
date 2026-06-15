@@ -73,6 +73,13 @@ type wrapperConverter struct {
 // wrapperConverters 所有 Wrapper 类型的转换器列表，在 init 中初始化
 var wrapperConverters []wrapperConverter
 
+// wrapperLookupMap 用于 O(1) 类型查找的映射表
+var (
+	wrapperByPtrType     map[reflect.Type]*wrapperConverter // 指针类型到转换器的映射
+	wrapperByWrapperType map[reflect.Type]*wrapperConverter // 包装类型到转换器的映射
+	wrapperByValueType   map[reflect.Type]*wrapperConverter // 值类型到转换器的映射
+)
+
 // init 注册所有 *T ↔ *wrapperspb.XxxValue 的转换器
 // 每个转换器包含 wrap（*T → *wrapperspb.XxxValue）和 unwrap（*wrapperspb.XxxValue → *T）两个方向
 // 当源值为 nil 指针时，wrap/unwrap 返回对应类型的零值（nil 指针）
@@ -265,13 +272,21 @@ func init() {
 			},
 		},
 	}
+
+	// 初始化指针类型到包装器的映射
+	wrapperByPtrType = make(map[reflect.Type]*wrapperConverter, len(wrapperConverters))
+	wrapperByWrapperType = make(map[reflect.Type]*wrapperConverter, len(wrapperConverters))
+	wrapperByValueType = make(map[reflect.Type]*wrapperConverter, len(wrapperConverters))
+	for i := range wrapperConverters {
+		wc := &wrapperConverters[i]
+		wrapperByPtrType[wc.ptrType] = wc
+		wrapperByWrapperType[wc.wrapperType] = wc
+		wrapperByValueType[wc.valueType] = wc
+	}
 }
 
 // tryConvertWrapper 尝试在 *T 和 *wrapperspb.XxxValue 之间自动转换
-// 遍历所有已注册的 wrapperConverter，匹配源类型和目标类型：
-//   - srcType == *T 且 dstType == *wrapperspb.XxxValue → 调用 wrap（Model → PB）
-//   - srcType == *wrapperspb.XxxValue 且 dstType == *T → 调用 unwrap（PB → Model）
-//
+// 使用 O(1) 的 map 查找替代线性扫描，提升性能
 // 返回值：
 //   - handled: 是否已处理该转换（true 表示匹配成功并完成转换）
 //   - error: 转换过程中的错误
@@ -279,31 +294,41 @@ func tryConvertWrapper(src, dst reflect.Value) (bool, error) {
 	srcType := src.Type()
 	dstType := dst.Type()
 
-	for _, wc := range wrapperConverters {
-		if srcType == wc.ptrType && dstType == wc.wrapperType {
+	if wc, ok := wrapperByPtrType[srcType]; ok {
+		if dstType == wc.wrapperType {
 			result := wc.wrap(src)
 			if result.IsValid() {
 				dst.Set(result)
 			}
 			return true, nil
 		}
-		if srcType == wc.wrapperType && dstType == wc.ptrType {
+	}
+
+	// 包装类型到包装器的映射
+	if wc, ok := wrapperByWrapperType[srcType]; ok {
+		if dstType == wc.ptrType {
 			result := wc.unwrap(src)
 			if result.IsValid() {
 				dst.Set(result)
 			}
 			return true, nil
 		}
-		if srcType == wc.valueType && dstType == wc.wrapperType {
-			result := wc.valueWrap(src)
-			dst.Set(result)
-			return true, nil
-		}
-		if srcType == wc.wrapperType && dstType == wc.valueType {
+
+		// 值类型到包装器的映射
+		if dstType == wc.valueType {
 			result := wc.valueUnwrap(src)
 			if result.IsValid() {
 				dst.Set(result)
 			}
+			return true, nil
+		}
+	}
+
+	// 值类型到包装器的映射
+	if wc, ok := wrapperByValueType[srcType]; ok {
+		if dstType == wc.wrapperType {
+			result := wc.valueWrap(src)
+			dst.Set(result)
 			return true, nil
 		}
 	}

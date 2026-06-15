@@ -205,6 +205,39 @@ func TestConvertPBToModel_SliceField(t *testing.T) {
 	assert.Equal(t, []string{"go", "pb"}, model.Tags)
 }
 
+func TestConvertSlice_ValuePointerElements(t *testing.T) {
+	type valueSlicePB struct {
+		Name   string
+		Counts []int32
+	}
+	type ptrSliceModel struct {
+		Name   string
+		Counts []*int32
+	}
+
+	bc := NewBidiConverter(valueSlicePB{}, ptrSliceModel{})
+
+	pb := valueSlicePB{Name: "offset", Counts: []int32{1, 0, 3}}
+	var model ptrSliceModel
+	assert.NoError(t, bc.ConvertPBToModel(pb, &model))
+	assert.Equal(t, "offset", model.Name)
+	if assert.Len(t, model.Counts, 3) {
+		if assert.NotNil(t, model.Counts[0]) {
+			assert.Equal(t, int32(1), *model.Counts[0])
+		}
+		assert.Nil(t, model.Counts[1])
+		if assert.NotNil(t, model.Counts[2]) {
+			assert.Equal(t, int32(3), *model.Counts[2])
+		}
+	}
+
+	count := int32(7)
+	model = ptrSliceModel{Name: "back", Counts: []*int32{&count, nil}}
+	var pbBack valueSlicePB
+	assert.NoError(t, bc.ConvertModelToPB(model, &pbBack))
+	assert.Equal(t, valueSlicePB{Name: "back", Counts: []int32{7, 0}}, pbBack)
+}
+
 func TestConvertPBToModel_PointerPB(t *testing.T) {
 	bc := NewBidiConverter(TestSimplePB{}, TestSimpleModel{})
 

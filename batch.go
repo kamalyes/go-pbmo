@@ -13,12 +13,250 @@ package pbmo
 
 import (
 	"reflect"
+	"unsafe"
 )
+
+// convertPBToModelPtrCached 批量将 PB 指针转换为 Model 指针，使用缓存优化
+func (bc *BidiConverter) convertPBToModelPtrCached(pbPtr, modelPtr unsafe.Pointer, cache *fieldCache) error {
+	if pbPtr == nil || modelPtr == nil {
+		return nil
+	}
+	if cache.mergedCopyFunc != nil && !cache.hasTransformers {
+		cache.mergedCopyFunc(pbPtr, modelPtr)
+		if len(cache.slowEntries) == 0 {
+			return nil
+		}
+	} else if len(cache.fastEntries) > 0 {
+		if cache.mergedCopyFunc != nil {
+			cache.mergedCopyFunc(pbPtr, modelPtr)
+		} else {
+			for i := range cache.fastEntries {
+				cache.fastEntries[i].copyFunc(pbPtr, modelPtr)
+			}
+		}
+	}
+	if len(cache.slowEntries) == 0 {
+		return nil
+	}
+
+	pbVal := reflect.NewAt(bc.pbType, pbPtr).Elem()
+	modelVal := reflect.NewAt(bc.modelType, modelPtr).Elem()
+	for i := range cache.slowEntries {
+		entry := &cache.slowEntries[i]
+		srcField := pbVal.FieldByIndex(entry.srcIndex)
+		dstField := modelVal.FieldByIndex(entry.dstIndex)
+		if !srcField.IsValid() || !dstField.IsValid() {
+			continue
+		}
+		if cache.hasTransformers && bc.transformers.Has(entry.srcName) {
+			srcField = bc.transformers.Apply(entry.srcName, srcField)
+		}
+		if err := convertFieldByKind(srcField, dstField, entry); err != nil {
+			return NewConversionError("field %s conversion failed: %v", entry.srcName, err)
+		}
+	}
+	return nil
+}
+
+// convertModelToPBPtrCached 批量将 Model 指针转换为 PB 指针，使用缓存优化
+func (bc *BidiConverter) convertModelToPBPtrCached(modelPtr, pbPtr unsafe.Pointer, cache *fieldCache) error {
+	if modelPtr == nil || pbPtr == nil {
+		return nil
+	}
+	if cache.mergedCopyFunc != nil && !cache.hasTransformers {
+		cache.mergedCopyFunc(modelPtr, pbPtr)
+		if len(cache.slowEntries) == 0 {
+			return nil
+		}
+	} else if len(cache.fastEntries) > 0 {
+		if cache.mergedCopyFunc != nil {
+			cache.mergedCopyFunc(modelPtr, pbPtr)
+		} else {
+			for i := range cache.fastEntries {
+				cache.fastEntries[i].copyFunc(modelPtr, pbPtr)
+			}
+		}
+	}
+	if len(cache.slowEntries) == 0 {
+		return nil
+	}
+
+	modelVal := reflect.NewAt(bc.modelType, modelPtr).Elem()
+	pbVal := reflect.NewAt(bc.pbType, pbPtr).Elem()
+	for i := range cache.slowEntries {
+		entry := &cache.slowEntries[i]
+		srcField := modelVal.FieldByIndex(entry.srcIndex)
+		dstField := pbVal.FieldByIndex(entry.dstIndex)
+		if !srcField.IsValid() || !dstField.IsValid() {
+			continue
+		}
+		if cache.hasTransformers && bc.transformers.Has(entry.srcName) {
+			srcField = bc.transformers.Apply(entry.srcName, srcField)
+		}
+		if err := convertFieldByKind(srcField, dstField, entry); err != nil {
+			return NewConversionError("field %s conversion failed: %v", entry.srcName, err)
+		}
+	}
+	return nil
+}
+
+// convertPBToModelCached 批量将 PB 结构体转换为 Model 结构体，使用缓存优化
+func (bc *BidiConverter) convertPBToModelCached(pbVal, modelVal reflect.Value, cache *fieldCache) error {
+	if !pbVal.IsValid() || !modelVal.IsValid() {
+		return nil
+	}
+	if modelVal.Kind() == reflect.Ptr {
+		if modelVal.IsNil() {
+			return ErrMustBePointer
+		}
+		modelVal = modelVal.Elem()
+	}
+	if pbVal.Kind() == reflect.Ptr {
+		if pbVal.IsNil() {
+			return nil
+		}
+		pbVal = pbVal.Elem()
+	}
+
+	canFastPath := pbVal.CanAddr() && modelVal.CanAddr()
+	if canFastPath && cache.mergedCopyFunc != nil && !cache.hasTransformers {
+		srcBase := unsafe.Pointer(pbVal.UnsafeAddr())
+		dstBase := unsafe.Pointer(modelVal.UnsafeAddr())
+		cache.mergedCopyFunc(srcBase, dstBase)
+		if len(cache.slowEntries) == 0 {
+			return nil
+		}
+	} else if canFastPath && len(cache.fastEntries) > 0 {
+		srcBase := unsafe.Pointer(pbVal.UnsafeAddr())
+		dstBase := unsafe.Pointer(modelVal.UnsafeAddr())
+		if cache.mergedCopyFunc != nil {
+			cache.mergedCopyFunc(srcBase, dstBase)
+		} else {
+			for i := range cache.fastEntries {
+				cache.fastEntries[i].copyFunc(srcBase, dstBase)
+			}
+		}
+	} else if len(cache.fastEntries) > 0 {
+		for i := range cache.fastEntries {
+			entry := &cache.fastEntries[i]
+			srcField := pbVal.FieldByIndex(entry.srcIndex)
+			dstField := modelVal.FieldByIndex(entry.dstIndex)
+			if !srcField.IsValid() || !dstField.IsValid() || !dstField.CanSet() {
+				continue
+			}
+			if err := convertFastEntryByReflect(srcField, dstField, entry); err != nil {
+				return NewConversionError("字段 %s 转换失败: %v", entry.srcName, err)
+			}
+		}
+	}
+
+	if len(cache.slowEntries) == 0 {
+		return nil
+	}
+
+	for i := range cache.slowEntries {
+		entry := &cache.slowEntries[i]
+		srcField := pbVal.FieldByIndex(entry.srcIndex)
+		dstField := modelVal.FieldByIndex(entry.dstIndex)
+		if !srcField.IsValid() || !dstField.IsValid() {
+			continue
+		}
+		if cache.hasTransformers && bc.transformers.Has(entry.srcName) {
+			srcField = bc.transformers.Apply(entry.srcName, srcField)
+		}
+		if err := convertFieldByKind(srcField, dstField, entry); err != nil {
+			return NewConversionError("字段 %s 转换失败: %v", entry.srcName, err)
+		}
+	}
+	return nil
+}
+
+// convertModelToPBCached 批量将 Model 结构体转换为 PB 结构体，使用缓存优化
+func (bc *BidiConverter) convertModelToPBCached(modelVal, pbVal reflect.Value, cache *fieldCache) error {
+	if !modelVal.IsValid() || !pbVal.IsValid() {
+		return nil
+	}
+	if pbVal.Kind() == reflect.Ptr {
+		if pbVal.IsNil() {
+			return ErrMustBePointer
+		}
+		pbVal = pbVal.Elem()
+	}
+	if modelVal.Kind() == reflect.Ptr {
+		if modelVal.IsNil() {
+			return nil
+		}
+		modelVal = modelVal.Elem()
+	}
+
+	canFastPath := modelVal.CanAddr() && pbVal.CanAddr()
+	if canFastPath && cache.mergedCopyFunc != nil && !cache.hasTransformers {
+		srcBase := unsafe.Pointer(modelVal.UnsafeAddr())
+		dstBase := unsafe.Pointer(pbVal.UnsafeAddr())
+		cache.mergedCopyFunc(srcBase, dstBase)
+		if len(cache.slowEntries) == 0 {
+			return nil
+		}
+	} else if canFastPath && len(cache.fastEntries) > 0 {
+		srcBase := unsafe.Pointer(modelVal.UnsafeAddr())
+		dstBase := unsafe.Pointer(pbVal.UnsafeAddr())
+		if cache.mergedCopyFunc != nil {
+			cache.mergedCopyFunc(srcBase, dstBase)
+		} else {
+			for i := range cache.fastEntries {
+				cache.fastEntries[i].copyFunc(srcBase, dstBase)
+			}
+		}
+	} else if len(cache.fastEntries) > 0 {
+		for i := range cache.fastEntries {
+			entry := &cache.fastEntries[i]
+			srcField := modelVal.FieldByIndex(entry.srcIndex)
+			dstField := pbVal.FieldByIndex(entry.dstIndex)
+			if !srcField.IsValid() || !dstField.IsValid() || !dstField.CanSet() {
+				continue
+			}
+			if err := convertFastEntryByReflect(srcField, dstField, entry); err != nil {
+				return NewConversionError("字段 %s 转换失败: %v", entry.srcName, err)
+			}
+		}
+	}
+
+	if len(cache.slowEntries) == 0 {
+		return nil
+	}
+
+	for i := range cache.slowEntries {
+		entry := &cache.slowEntries[i]
+		srcField := modelVal.FieldByIndex(entry.srcIndex)
+		dstField := pbVal.FieldByIndex(entry.dstIndex)
+		if !srcField.IsValid() || !dstField.IsValid() {
+			continue
+		}
+		if cache.hasTransformers && bc.transformers.Has(entry.srcName) {
+			srcField = bc.transformers.Apply(entry.srcName, srcField)
+		}
+		if err := convertFieldByKind(srcField, dstField, entry); err != nil {
+			return NewConversionError("字段 %s 转换失败: %v", entry.srcName, err)
+		}
+	}
+	return nil
+}
 
 // BatchConvertPBToModel 批量 PB -> Model 转换
 //
 // Deprecated: 使用泛型函数 FromPBs[P, M] 替代，类型更安全、调用更简洁
 // 示例: models, err := pbmo.FromPBs[UserPB, UserModel](pbs)
+func batchElementPtr(slice reflect.Value, elemType reflect.Type, isPtr bool, index int) unsafe.Pointer {
+	if isPtr {
+		elem := slice.Index(index)
+		if elem.IsNil() {
+			return nil
+		}
+		return unsafe.Pointer(elem.Pointer())
+	}
+	return addPtr(slice.UnsafePointer(), uintptr(index)*elemType.Size())
+}
+
 func (bc *BidiConverter) BatchConvertPBToModel(pbs interface{}, modelsPtr interface{}) error {
 	pbsVal := reflect.ValueOf(pbs)
 	if pbsVal.Kind() == reflect.Ptr {
@@ -41,20 +279,45 @@ func (bc *BidiConverter) BatchConvertPBToModel(pbs interface{}, modelsPtr interf
 	}
 
 	models := reflect.MakeSlice(modelsVal.Type(), pbsVal.Len(), pbsVal.Len())
+	cache := bc.pbToModelFieldCache()
+	pbType := pbsVal.Type().Elem()
+	isPBPtr := pbType.Kind() == reflect.Ptr
+	if isPBPtr {
+		pbType = pbType.Elem()
+	}
+	var modelBase unsafe.Pointer
+	var modelSize uintptr
+	if !isModelPtr {
+		modelBase = models.UnsafePointer()
+		modelSize = modelType.Size()
+	}
+	if !isModelPtr && cache.mergedCopyFunc != nil && !cache.hasTransformers && len(cache.slowEntries) == 0 {
+		for i := 0; i < pbsVal.Len(); i++ {
+			pbPtr := batchElementPtr(pbsVal, pbType, isPBPtr, i)
+			if pbPtr != nil {
+				cache.mergedCopyFunc(pbPtr, addPtr(modelBase, uintptr(i)*modelSize))
+			}
+		}
+		modelsVal.Set(models)
+		return nil
+	}
 
 	for i := 0; i < pbsVal.Len(); i++ {
-		pb := pbsVal.Index(i)
-		model := models.Index(i)
-
-		modelPtr := reflect.New(modelType)
-		if err := bc.ConvertPBToModel(pb.Interface(), modelPtr.Interface()); err != nil {
-			return NewBatchError("元素 %d: %v", i, err)
-		}
+		pbPtr := batchElementPtr(pbsVal, pbType, isPBPtr, i)
 
 		if isModelPtr {
+			model := models.Index(i)
+			modelPtr := reflect.New(modelType)
+			if err := bc.convertPBToModelPtrCached(pbPtr, modelPtr.UnsafePointer(), cache); err != nil {
+				return NewBatchError("元素 %d: %v", i, err)
+			}
+
 			model.Set(modelPtr)
 		} else {
-			model.Set(modelPtr.Elem())
+			modelPtr := addPtr(modelBase, uintptr(i)*modelSize)
+			if err := bc.convertPBToModelPtrCached(pbPtr, modelPtr, cache); err != nil {
+				return NewBatchError("元素 %d: %v", i, err)
+			}
 		}
 	}
 
@@ -88,20 +351,45 @@ func (bc *BidiConverter) BatchConvertModelToPB(models interface{}, pbsPtr interf
 	}
 
 	pbs := reflect.MakeSlice(pbsVal.Type(), modelsVal.Len(), modelsVal.Len())
+	cache := bc.modelToPBFieldCache()
+	modelType := modelsVal.Type().Elem()
+	isModelPtr := modelType.Kind() == reflect.Ptr
+	if isModelPtr {
+		modelType = modelType.Elem()
+	}
+	var pbBase unsafe.Pointer
+	var pbSize uintptr
+	if !isPBPtr {
+		pbBase = pbs.UnsafePointer()
+		pbSize = pbType.Size()
+	}
+	if !isPBPtr && cache.mergedCopyFunc != nil && !cache.hasTransformers && len(cache.slowEntries) == 0 {
+		for i := 0; i < modelsVal.Len(); i++ {
+			modelPtr := batchElementPtr(modelsVal, modelType, isModelPtr, i)
+			if modelPtr != nil {
+				cache.mergedCopyFunc(modelPtr, addPtr(pbBase, uintptr(i)*pbSize))
+			}
+		}
+		pbsVal.Set(pbs)
+		return nil
+	}
 
 	for i := 0; i < modelsVal.Len(); i++ {
-		model := modelsVal.Index(i)
-		pb := pbs.Index(i)
-
-		pbPtr := reflect.New(pbType)
-		if err := bc.ConvertModelToPB(model.Interface(), pbPtr.Interface()); err != nil {
-			return NewBatchError("元素 %d: %v", i, err)
-		}
+		modelPtr := batchElementPtr(modelsVal, modelType, isModelPtr, i)
 
 		if isPBPtr {
+			pb := pbs.Index(i)
+			pbPtr := reflect.New(pbType)
+			if err := bc.convertModelToPBPtrCached(modelPtr, pbPtr.UnsafePointer(), cache); err != nil {
+				return NewBatchError("元素 %d: %v", i, err)
+			}
+
 			pb.Set(pbPtr)
 		} else {
-			pb.Set(pbPtr.Elem())
+			pbPtr := addPtr(pbBase, uintptr(i)*pbSize)
+			if err := bc.convertModelToPBPtrCached(modelPtr, pbPtr, cache); err != nil {
+				return NewBatchError("element %d: %v", i, err)
+			}
 		}
 	}
 
@@ -155,13 +443,14 @@ func (bc *BidiConverter) SafeBatchConvertPBToModel(pbs interface{}, modelsPtr in
 	}
 
 	models := reflect.MakeSlice(modelsVal.Type(), pbsVal.Len(), pbsVal.Len())
+	cache := bc.pbToModelFieldCache()
 
 	for i := 0; i < pbsVal.Len(); i++ {
 		pb := pbsVal.Index(i)
 		item := BatchItem{Index: i}
 
 		modelPtr := reflect.New(modelType)
-		if err := bc.ConvertPBToModel(pb.Interface(), modelPtr.Interface()); err != nil {
+		if err := bc.convertPBToModelCached(pb, modelPtr, cache); err != nil {
 			item.Success = false
 			item.Error = err
 			result.FailureCount++
@@ -214,13 +503,14 @@ func (bc *BidiConverter) SafeBatchConvertModelToPB(models interface{}, pbsPtr in
 	}
 
 	pbs := reflect.MakeSlice(pbsVal.Type(), modelsVal.Len(), modelsVal.Len())
+	cache := bc.modelToPBFieldCache()
 
 	for i := 0; i < modelsVal.Len(); i++ {
 		model := modelsVal.Index(i)
 		item := BatchItem{Index: i}
 
 		pbPtr := reflect.New(pbType)
-		if err := bc.ConvertModelToPB(model.Interface(), pbPtr.Interface()); err != nil {
+		if err := bc.convertModelToPBCached(model, pbPtr, cache); err != nil {
 			item.Success = false
 			item.Error = err
 			result.FailureCount++

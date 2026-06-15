@@ -17,6 +17,7 @@ package pbmo
 import (
 	"reflect"
 	"sync"
+	"sync/atomic"
 )
 
 // TransformerFunc 字段转换函数类型
@@ -25,8 +26,10 @@ type TransformerFunc func(interface{}) interface{}
 
 // TransformerRegistry 字段转换器注册表
 // 封装 sync.Map 提供类型安全的字段转换器管理，天然并发安全
+// count: 原子计数器，避免 Count() 使用 sync.Map.Range() 的 O(n) 开销
 type TransformerRegistry struct {
 	transformers sync.Map
+	count        int64
 }
 
 // NewTransformerRegistry 创建字段转换器注册表
@@ -36,13 +39,17 @@ func NewTransformerRegistry() *TransformerRegistry {
 
 // Register 注册字段转换器
 func (tr *TransformerRegistry) Register(field string, fn TransformerFunc) {
-	tr.transformers.Store(field, fn)
+	if _, loaded := tr.transformers.LoadOrStore(field, fn); !loaded {
+		atomic.AddInt64(&tr.count, 1)
+	}
 }
 
 // RegisterBatch 批量注册字段转换器
 func (tr *TransformerRegistry) RegisterBatch(transformers map[string]TransformerFunc) {
 	for field, fn := range transformers {
-		tr.transformers.Store(field, fn)
+		if _, loaded := tr.transformers.LoadOrStore(field, fn); !loaded {
+			atomic.AddInt64(&tr.count, 1)
+		}
 	}
 }
 
@@ -73,7 +80,9 @@ func (tr *TransformerRegistry) Has(field string) bool {
 
 // Remove 移除字段转换器
 func (tr *TransformerRegistry) Remove(field string) {
-	tr.transformers.Delete(field)
+	if _, loaded := tr.transformers.LoadAndDelete(field); loaded {
+		atomic.AddInt64(&tr.count, -1)
+	}
 }
 
 // Clear 清空所有转换器
@@ -82,6 +91,7 @@ func (tr *TransformerRegistry) Clear() {
 		tr.transformers.Delete(key)
 		return true
 	})
+	atomic.StoreInt64(&tr.count, 0)
 }
 
 // Fields 获取所有已注册的字段名
@@ -96,20 +106,18 @@ func (tr *TransformerRegistry) Fields() []string {
 
 // Count 获取已注册的转换器数量
 func (tr *TransformerRegistry) Count() int {
-	count := 0
-	tr.transformers.Range(func(key, value interface{}) bool {
-		count++
-		return true
-	})
-	return count
+	return int(atomic.LoadInt64(&tr.count))
 }
 
 // Clone 克隆转换器注册表
 func (tr *TransformerRegistry) Clone() *TransformerRegistry {
 	cloned := NewTransformerRegistry()
+	var cnt int64
 	tr.transformers.Range(func(key, value interface{}) bool {
 		cloned.transformers.Store(key, value)
+		cnt++
 		return true
 	})
+	atomic.StoreInt64(&cloned.count, cnt)
 	return cloned
 }
