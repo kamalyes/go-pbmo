@@ -1,0 +1,23 @@
+name: Trigger Benchmark
+
+on:
+  push:
+    branches: [master]
+    paths-ignore:
+      - "**.md"
+      - ".github/**"
+      - "docs/**"
+
+permissions:
+  actions: write
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch benchmark workflow
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.GH_GPA_TOKEN }}
+          repository: kamalyes/go-pbmo-benchmark
+          event-type: go-pbmo-updated
