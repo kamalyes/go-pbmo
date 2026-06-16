@@ -39,12 +39,11 @@ func (bc *BidiConverter) convertPBToModelPtrCached(pbPtr, modelPtr unsafe.Pointe
 		return nil
 	}
 
-	pbVal := reflect.NewAt(bc.pbType, pbPtr).Elem()
-	modelVal := reflect.NewAt(bc.modelType, modelPtr).Elem()
+	// 使用预计算的偏移量直接定位字段，避免 FieldByIndex 的开销
 	for i := range cache.slowEntries {
 		entry := &cache.slowEntries[i]
-		srcField := pbVal.FieldByIndex(entry.srcIndex)
-		dstField := modelVal.FieldByIndex(entry.dstIndex)
+		srcField := reflect.NewAt(entry.srcType, addPtr(pbPtr, entry.srcOffset)).Elem()
+		dstField := reflect.NewAt(entry.dstType, addPtr(modelPtr, entry.dstOffset)).Elem()
 		if !srcField.IsValid() || !dstField.IsValid() {
 			continue
 		}
@@ -81,12 +80,11 @@ func (bc *BidiConverter) convertModelToPBPtrCached(modelPtr, pbPtr unsafe.Pointe
 		return nil
 	}
 
-	modelVal := reflect.NewAt(bc.modelType, modelPtr).Elem()
-	pbVal := reflect.NewAt(bc.pbType, pbPtr).Elem()
+	// 使用预计算的偏移量直接定位字段，避免 FieldByIndex 的开销
 	for i := range cache.slowEntries {
 		entry := &cache.slowEntries[i]
-		srcField := modelVal.FieldByIndex(entry.srcIndex)
-		dstField := pbVal.FieldByIndex(entry.dstIndex)
+		srcField := reflect.NewAt(entry.srcType, addPtr(modelPtr, entry.srcOffset)).Elem()
+		dstField := reflect.NewAt(entry.dstType, addPtr(pbPtr, entry.dstOffset)).Elem()
 		if !srcField.IsValid() || !dstField.IsValid() {
 			continue
 		}
