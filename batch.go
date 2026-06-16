@@ -152,18 +152,38 @@ func (bc *BidiConverter) convertPBToModelCached(pbVal, modelVal reflect.Value, c
 		return nil
 	}
 
-	for i := range cache.slowEntries {
-		entry := &cache.slowEntries[i]
-		srcField := pbVal.FieldByIndex(entry.srcIndex)
-		dstField := modelVal.FieldByIndex(entry.dstIndex)
-		if !srcField.IsValid() || !dstField.IsValid() {
-			continue
+	// 优先使用 unsafe 指针直接定位字段，避免 FieldByIndex 开销
+	if canFastPath {
+		srcBase := unsafe.Pointer(pbVal.UnsafeAddr())
+		dstBase := unsafe.Pointer(modelVal.UnsafeAddr())
+		for i := range cache.slowEntries {
+			entry := &cache.slowEntries[i]
+			srcField := reflect.NewAt(entry.srcType, addPtr(srcBase, entry.srcOffset)).Elem()
+			dstField := reflect.NewAt(entry.dstType, addPtr(dstBase, entry.dstOffset)).Elem()
+			if !srcField.IsValid() || !dstField.IsValid() {
+				continue
+			}
+			if cache.hasTransformers && bc.transformers.Has(entry.srcName) {
+				srcField = bc.transformers.Apply(entry.srcName, srcField)
+			}
+			if err := convertFieldByKind(srcField, dstField, entry); err != nil {
+				return NewConversionError("字段 %s 转换失败: %v", entry.srcName, err)
+			}
 		}
-		if cache.hasTransformers && bc.transformers.Has(entry.srcName) {
-			srcField = bc.transformers.Apply(entry.srcName, srcField)
-		}
-		if err := convertFieldByKind(srcField, dstField, entry); err != nil {
-			return NewConversionError("字段 %s 转换失败: %v", entry.srcName, err)
+	} else {
+		for i := range cache.slowEntries {
+			entry := &cache.slowEntries[i]
+			srcField := pbVal.FieldByIndex(entry.srcIndex)
+			dstField := modelVal.FieldByIndex(entry.dstIndex)
+			if !srcField.IsValid() || !dstField.IsValid() {
+				continue
+			}
+			if cache.hasTransformers && bc.transformers.Has(entry.srcName) {
+				srcField = bc.transformers.Apply(entry.srcName, srcField)
+			}
+			if err := convertFieldByKind(srcField, dstField, entry); err != nil {
+				return NewConversionError("字段 %s 转换失败: %v", entry.srcName, err)
+			}
 		}
 	}
 	return nil
@@ -223,18 +243,38 @@ func (bc *BidiConverter) convertModelToPBCached(modelVal, pbVal reflect.Value, c
 		return nil
 	}
 
-	for i := range cache.slowEntries {
-		entry := &cache.slowEntries[i]
-		srcField := modelVal.FieldByIndex(entry.srcIndex)
-		dstField := pbVal.FieldByIndex(entry.dstIndex)
-		if !srcField.IsValid() || !dstField.IsValid() {
-			continue
+	// 优先使用 unsafe 指针直接定位字段，避免 FieldByIndex 开销
+	if canFastPath {
+		srcBase := unsafe.Pointer(modelVal.UnsafeAddr())
+		dstBase := unsafe.Pointer(pbVal.UnsafeAddr())
+		for i := range cache.slowEntries {
+			entry := &cache.slowEntries[i]
+			srcField := reflect.NewAt(entry.srcType, addPtr(srcBase, entry.srcOffset)).Elem()
+			dstField := reflect.NewAt(entry.dstType, addPtr(dstBase, entry.dstOffset)).Elem()
+			if !srcField.IsValid() || !dstField.IsValid() {
+				continue
+			}
+			if cache.hasTransformers && bc.transformers.Has(entry.srcName) {
+				srcField = bc.transformers.Apply(entry.srcName, srcField)
+			}
+			if err := convertFieldByKind(srcField, dstField, entry); err != nil {
+				return NewConversionError("字段 %s 转换失败: %v", entry.srcName, err)
+			}
 		}
-		if cache.hasTransformers && bc.transformers.Has(entry.srcName) {
-			srcField = bc.transformers.Apply(entry.srcName, srcField)
-		}
-		if err := convertFieldByKind(srcField, dstField, entry); err != nil {
-			return NewConversionError("字段 %s 转换失败: %v", entry.srcName, err)
+	} else {
+		for i := range cache.slowEntries {
+			entry := &cache.slowEntries[i]
+			srcField := modelVal.FieldByIndex(entry.srcIndex)
+			dstField := pbVal.FieldByIndex(entry.dstIndex)
+			if !srcField.IsValid() || !dstField.IsValid() {
+				continue
+			}
+			if cache.hasTransformers && bc.transformers.Has(entry.srcName) {
+				srcField = bc.transformers.Apply(entry.srcName, srcField)
+			}
+			if err := convertFieldByKind(srcField, dstField, entry); err != nil {
+				return NewConversionError("字段 %s 转换失败: %v", entry.srcName, err)
+			}
 		}
 	}
 	return nil
