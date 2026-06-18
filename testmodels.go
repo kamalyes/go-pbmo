@@ -304,3 +304,16 @@ type TestModelUnexported struct {
 	Name   string `gorm:"column:name" json:"name"`
 	secret string
 }
+
+// TestModelNoPbmoTag 无 pbmo tag 的 Model（仅 gorm/json tag），
+// 用于测试 WithFieldMapping 在无 pbmo tag 时是否生效
+type TestModelNoPbmoTag struct {
+	ConfigKey int    `gorm:"column:config_key" json:"config_key"`
+	Name      string `gorm:"column:name" json:"name"`
+}
+
+// TestPBNoPbmoTag 对应的 PB，字段名与 Model 不同，需要 FieldMapping
+type TestPBNoPbmoTag struct {
+	Key  int32
+	Name string
+}

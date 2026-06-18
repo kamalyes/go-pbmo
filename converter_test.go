@@ -174,6 +174,31 @@ func TestBidiConverter_RegisterFieldMapping(t *testing.T) {
 	assert.Equal(t, "batch_mapped", model.Name)
 }
 
+// TestFieldMapping_NoPbmoTag 测试 Model 无 pbmo tag 时 WithFieldMapping 是否生效
+// 回归测试：修复 hasPbmoTag 推断方向失败导致 FieldMapping 被跳过的 bug
+func TestFieldMapping_NoPbmoTag(t *testing.T) {
+	bc := NewBidiConverter(TestPBNoPbmoTag{}, TestModelNoPbmoTag{})
+	bc.WithFieldMapping("ConfigKey", "Key")
+
+	t.Run("ModelToPB", func(t *testing.T) {
+		model := TestModelNoPbmoTag{ConfigKey: 42, Name: "test"}
+		var pb TestPBNoPbmoTag
+		err := bc.ConvertModelToPB(model, &pb)
+		assert.NoError(t, err)
+		assert.Equal(t, int32(42), pb.Key, "ConfigKey 应通过 FieldMapping 映射到 Key")
+		assert.Equal(t, "test", pb.Name)
+	})
+
+	t.Run("PBToModel", func(t *testing.T) {
+		pb := TestPBNoPbmoTag{Key: 99, Name: "hello"}
+		var model TestModelNoPbmoTag
+		err := bc.ConvertPBToModel(pb, &model)
+		assert.NoError(t, err)
+		assert.Equal(t, 99, model.ConfigKey, "Key 应通过反向 FieldMapping 映射到 ConfigKey")
+		assert.Equal(t, "hello", model.Name)
+	})
+}
+
 func TestBidiConverter_GetModelType(t *testing.T) {
 	bc := NewBidiConverter(TestSimplePB{}, TestSimpleModel{})
 	assert.Equal(t, "TestSimpleModel", bc.GetModelType().Name())

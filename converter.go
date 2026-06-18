@@ -2319,7 +2319,7 @@ func buildFieldNameMap(modelType, pbType reflect.Type, opts *Options) map[string
 //  6. 其余字段 → slowEntries
 //  7. 构建 mergedCopyFunc 合并所有 fastEntries 的 copyFunc 为单次调用闭包
 //  8. 预计算 hasTransformers 标志，避免每次调用 Count()
-func buildFieldCache(srcType, dstType reflect.Type, opts *Options, transformers *TransformerRegistry) *fieldCache {
+func buildFieldCache(srcType, dstType reflect.Type, srcIsModel bool, opts *Options, transformers *TransformerRegistry) *fieldCache {
 	dstFields := make(map[string]reflect.StructField)
 	for i := 0; i < dstType.NumField(); i++ {
 		f := dstType.Field(i)
@@ -2334,14 +2334,14 @@ func buildFieldCache(srcType, dstType reflect.Type, opts *Options, transformers 
 	// 对于 Model→PB: src=Model, dst=PB, 需要 Model字段名→PB字段名
 	srcToDst := make(map[string]string)
 
-	// hasPbmoTag: 检查类型是否有 pbmo tag 来判断方向
-	srcIsModel := hasPbmoTag(srcType)
-	dstIsModel := hasPbmoTag(dstType)
+	// 方向由调用方显式传入（BidiConverter 已知 Model/PB 类型），
+	// 不再依赖 hasPbmoTag 推断，避免 Model 无 pbmo tag 时 FieldMapping 失效
+	dstIsModel := !srcIsModel
 
 	// 构建 modelToPbMap: Model字段名 → PB字段名
 	modelToPbMap := make(map[string]string)
 	if opts.TagMappingEnabled {
-		// 确定哪个类型是 Model（有 pbmo tag 的）
+		// 确定哪个类型是 Model
 		var modelType reflect.Type
 		if srcIsModel && !dstIsModel {
 			modelType = srcType
@@ -2895,10 +2895,10 @@ func (bc *BidiConverter) fieldCaches() (*fieldCache, *fieldCache) {
 	bc.mu.Lock()
 	defer bc.mu.Unlock()
 	if bc.pbToModelCache == nil {
-		bc.pbToModelCache = buildFieldCache(bc.pbType, bc.modelType, bc.options, bc.transformers)
+		bc.pbToModelCache = buildFieldCache(bc.pbType, bc.modelType, false, bc.options, bc.transformers)
 	}
 	if bc.modelToPBCache == nil {
-		bc.modelToPBCache = buildFieldCache(bc.modelType, bc.pbType, bc.options, bc.transformers)
+		bc.modelToPBCache = buildFieldCache(bc.modelType, bc.pbType, true, bc.options, bc.transformers)
 	}
 	bc.pbToModelPtr.Store(bc.pbToModelCache)
 	bc.modelToPBPtr.Store(bc.modelToPBCache)
