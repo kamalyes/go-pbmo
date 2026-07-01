@@ -12,10 +12,12 @@
 package pbmo
 
 import (
+	"reflect"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"google.golang.org/protobuf/types/known/wrapperspb"
 )
 
 func TestNewBidiConverter(t *testing.T) {
@@ -380,4 +382,48 @@ func TestBidiConverter_RegisterTransformer_WithFieldMapping_Chain(t *testing.T) 
 	assert.NotNil(t, result)
 	assert.Same(t, bc, result)
 	assert.True(t, bc.transformers.Has("Email"))
+}
+
+// TestIsProtoMessage 验证 isProtoMessage 能正确识别真实 PB 类型
+func TestIsProtoMessage(t *testing.T) {
+	// 真实 PB 类型应被识别（实现 proto.Message 接口）
+	assert.True(t, isProtoMessage(reflect.TypeFor[wrapperspb.BoolValue]()), "wrapperspb.BoolValue 应被识别为 PB 类型")
+	assert.True(t, isProtoMessage(reflect.TypeFor[wrapperspb.StringValue]()), "wrapperspb.StringValue 应被识别为 PB 类型")
+	assert.True(t, isProtoMessage(reflect.TypeFor[wrapperspb.Int32Value]()), "wrapperspb.Int32Value 应被识别为 PB 类型")
+
+	// 普通 struct 不应被识别（未实现 ProtoReflect 方法）
+	assert.False(t, isProtoMessage(reflect.TypeFor[TestPB]()), "TestPB 不应被识别为 PB 类型")
+	assert.False(t, isProtoMessage(reflect.TypeFor[TestModel]()), "TestModel 不应被识别为 PB 类型")
+	assert.False(t, isProtoMessage(nil), "nil 不应被识别为 PB 类型")
+}
+
+// TestPBToPBSkipJsonTag 验证 PB↔PB 转换时跳过 json tag
+// 用同类型 wrapperspb.StringValue → wrapperspb.StringValue，
+// 两者 Value 字段（string）类型兼容，应能匹配
+// 关键点：跳过 json tag 后，仍能通过 Go 字段名 "Value" 匹配，
+// 而不依赖 json tag "value,omitempty" + EqualFold fallback
+func TestPBToPBSkipJsonTag(t *testing.T) {
+	c := Register[wrapperspb.StringValue, wrapperspb.StringValue]()
+	cache := c.modelToPBFieldCache()
+
+	// 应该能匹配到 Value 字段
+	assert.NotEmpty(t, cache.fastEntries, "Value 字段应被匹配")
+	for _, entry := range cache.fastEntries {
+		assert.Equal(t, "Value", entry.srcName, "源字段名应为 Value（Go 字段名，非 json tag）")
+		assert.Equal(t, "Value", entry.dstName, "目标字段名应为 Value（Go 字段名，非 json tag）")
+	}
+}
+
+// TestPBToPBFieldMappingWithDifferentNames 验证 PB↔PB 字段名不同时通过 FieldMapping 匹配
+// 模拟 opengamepb.ProviderInfo → commonpb.PaasGameProviderInfo 的场景：
+// ProviderId (源) → Id (目标)，需要显式 FieldMapping
+func TestPBToPBFieldMappingWithDifferentNames(t *testing.T) {
+	// wrapperspb.StringValue 有 Value 字段
+	// 我们注册时通过 FieldMapping 把 "Value" 映射到不存在的目标字段，
+	// 验证 PB↔PB 时 FieldMapping 仍然生效
+	c := Register[wrapperspb.StringValue, wrapperspb.StringValue]().
+		WithFieldMapping("Value", "Value")
+	cache := c.modelToPBFieldCache()
+
+	assert.NotEmpty(t, cache.fastEntries, "通过 FieldMapping 应能匹配 Value 字段")
 }

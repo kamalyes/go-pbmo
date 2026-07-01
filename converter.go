@@ -59,9 +59,27 @@ import (
 	"time"
 	"unsafe"
 
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 )
+
+// isProtoMessage 检查类型是否为 protobuf 生成的消息类型
+// 用于在 PB↔PB 转换时跳过 json tag 读取
+// 设计原因：PB 的 json tag 是 protoc 生成的 snake_case 名字（如 "vendor_game_fields"），
+// 不是 Go 字段名（如 "VendorGameFields"），读 json tag 会导致字段映射混乱，
+// 依赖 strings.EqualFold fallback 才能匹配，不是设计意图
+// 注意：proto.Message 接口（ProtoReflect 方法）通常用指针接收者实现，
+// 所以必须检查指针类型，否则值类型（如 wrapperspb.BoolValue）会被漏判
+func isProtoMessage(t reflect.Type) bool {
+	if t == nil {
+		return false
+	}
+	if t.Kind() != reflect.Ptr {
+		t = reflect.PointerTo(t)
+	}
+	return t.Implements(reflect.TypeFor[proto.Message]())
+}
 
 // fieldCopyFunc 安全指针转换函数，在字段缓存构建时预生成
 // 接收源/目标结构体基地址，直接通过偏移量+类型完成赋值，完全绕过 reflect.Value
@@ -2348,7 +2366,10 @@ func buildFieldCache(srcType, dstType reflect.Type, srcIsModel bool, opts *Optio
 		} else if dstIsModel && !srcIsModel {
 			modelType = dstType
 		}
-		if modelType != nil {
+		// 跳过 PB 类型：PB 的 json tag 是 protoc 生成的 snake_case 名字，
+		// 不是 Go 字段名，读它会污染 modelToPbMap，导致字段映射依赖 fallback
+		// PB↔PB 转换时应直接用 Go 字段名匹配，或通过 FieldMapping 显式映射
+		if modelType != nil && !isProtoMessage(modelType) {
 			for i := 0; i < modelType.NumField(); i++ {
 				field := modelType.Field(i)
 				if !field.IsExported() {
@@ -3094,7 +3115,7 @@ func (bc *BidiConverter) ConvertModelToPB(model, pbPtr interface{}) error {
 }
 
 // convertFastEntryByReflect 当值不可寻址时，使用 reflect 回退路径执行快速条目转换
-// 处理的字段种类与 convertFieldByKind 保持一致，避免源对象按值传入时跳过 fastEntry 字段。
+// 处理的字段种类与 convertFieldByKind 保持一致，避免源对象按值传入时跳过 fastEntry 字段
 func convertFastEntryByReflect(srcField, dstField reflect.Value, entry *fieldMappingEntry) error {
 	if !srcField.CanInterface() || !dstField.CanSet() {
 		return nil
