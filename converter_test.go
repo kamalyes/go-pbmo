@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"google.golang.org/protobuf/types/known/structpb"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 )
 
@@ -426,4 +427,173 @@ func TestPBToPBFieldMappingWithDifferentNames(t *testing.T) {
 	cache := c.modelToPBFieldCache()
 
 	assert.NotEmpty(t, cache.fastEntries, "通过 FieldMapping 应能匹配 Value 字段")
+}
+
+func TestConvertMapToStruct_ModelToPB(t *testing.T) {
+	bc := NewBidiConverter(TestMapStructPB{}, TestMapStructModel{})
+
+	model := TestMapStructModel{
+		Name: "test",
+		Params: map[string]interface{}{
+			"timeout":  float64(30),
+			"enabled":  true,
+			"host":     "localhost",
+			"nested":   map[string]interface{}{"key": "value"},
+			"tags":     []interface{}{"a", "b"},
+			"null_val": nil,
+		},
+	}
+
+	var pb TestMapStructPB
+	err := bc.ConvertModelToPB(model, &pb)
+	assert.NoError(t, err)
+	assert.Equal(t, "test", pb.Name)
+	assert.NotNil(t, pb.Params)
+
+	m := pb.Params.AsMap()
+	assert.Equal(t, float64(30), m["timeout"])
+	assert.Equal(t, true, m["enabled"])
+	assert.Equal(t, "localhost", m["host"])
+	assert.Equal(t, nil, m["null_val"])
+
+	nested, ok := m["nested"].(map[string]interface{})
+	assert.True(t, ok)
+	assert.Equal(t, "value", nested["key"])
+
+	tags, ok := m["tags"].([]interface{})
+	assert.True(t, ok)
+	assert.Equal(t, []interface{}{"a", "b"}, tags)
+}
+
+func TestConvertStructToMap_PBToModel(t *testing.T) {
+	bc := NewBidiConverter(TestMapStructPB{}, TestMapStructModel{})
+
+	st, err := structpb.NewStruct(map[string]interface{}{
+		"timeout": float64(60),
+		"enabled": false,
+		"host":    "0.0.0.0",
+		"nested":  map[string]interface{}{"depth": float64(3)},
+		"ports":   []interface{}{float64(8080), float64(8443)},
+	})
+	assert.NoError(t, err)
+
+	pb := TestMapStructPB{
+		Name:   "prod",
+		Params: st,
+	}
+
+	var model TestMapStructModel
+	err = bc.ConvertPBToModel(pb, &model)
+	assert.NoError(t, err)
+	assert.Equal(t, "prod", model.Name)
+	assert.NotNil(t, model.Params)
+
+	assert.Equal(t, float64(60), model.Params["timeout"])
+	assert.Equal(t, false, model.Params["enabled"])
+	assert.Equal(t, "0.0.0.0", model.Params["host"])
+
+	nested, ok := model.Params["nested"].(map[string]interface{})
+	assert.True(t, ok)
+	assert.Equal(t, float64(3), nested["depth"])
+
+	ports, ok := model.Params["ports"].([]interface{})
+	assert.True(t, ok)
+	assert.Equal(t, float64(8080), ports[0])
+	assert.Equal(t, float64(8443), ports[1])
+}
+
+func TestConvertMapStruct_NilValues(t *testing.T) {
+	bc := NewBidiConverter(TestMapStructPB{}, TestMapStructModel{})
+
+	// Model→PB: nil map → nil Struct
+	t.Run("nil_map_to_struct", func(t *testing.T) {
+		model := TestMapStructModel{Name: "empty"}
+		var pb TestMapStructPB
+		err := bc.ConvertModelToPB(model, &pb)
+		assert.NoError(t, err)
+		assert.Equal(t, "empty", pb.Name)
+		assert.Nil(t, pb.Params)
+	})
+
+	// PB→Model: nil Struct → nil map
+	t.Run("nil_struct_to_map", func(t *testing.T) {
+		pb := TestMapStructPB{Name: "empty"}
+		var model TestMapStructModel
+		err := bc.ConvertPBToModel(pb, &model)
+		assert.NoError(t, err)
+		assert.Equal(t, "empty", model.Name)
+		assert.Nil(t, model.Params)
+	})
+}
+
+func TestConvertMapStruct_EmptyMap(t *testing.T) {
+	bc := NewBidiConverter(TestMapStructPB{}, TestMapStructModel{})
+
+	// Model→PB: 空 map → 空 Struct（非 nil）
+	t.Run("empty_map_to_struct", func(t *testing.T) {
+		model := TestMapStructModel{
+			Name:   "test",
+			Params: map[string]interface{}{},
+		}
+		var pb TestMapStructPB
+		err := bc.ConvertModelToPB(model, &pb)
+		assert.NoError(t, err)
+		assert.NotNil(t, pb.Params)
+		assert.Equal(t, 0, len(pb.Params.GetFields()))
+	})
+
+	// PB→Model: 空 Struct → 空 map
+	t.Run("empty_struct_to_map", func(t *testing.T) {
+		st, err := structpb.NewStruct(map[string]interface{}{})
+		assert.NoError(t, err)
+		pb := TestMapStructPB{Name: "test", Params: st}
+		var model TestMapStructModel
+		err = bc.ConvertPBToModel(pb, &model)
+		assert.NoError(t, err)
+		assert.NotNil(t, model.Params)
+		assert.Equal(t, 0, len(model.Params))
+	})
+}
+
+func TestConvertMapStruct_RoundTrip(t *testing.T) {
+	// Model→PB→Model 往返一致性
+	bc := NewBidiConverter(TestMapStructPB{}, TestMapStructModel{})
+
+	original := TestMapStructModel{
+		Name: "roundtrip",
+		Params: map[string]interface{}{
+			"int_val":   float64(42),
+			"float_val": float64(3.14),
+			"str_val":   "hello",
+			"bool_val":  true,
+			"null_val":  nil,
+			"nested":    map[string]interface{}{"inner": float64(1)},
+			"list_val":  []interface{}{float64(1), float64(2), float64(3)},
+		},
+	}
+
+	var pb TestMapStructPB
+	err := bc.ConvertModelToPB(original, &pb)
+	assert.NoError(t, err)
+
+	var roundTrip TestMapStructModel
+	err = bc.ConvertPBToModel(pb, &roundTrip)
+	assert.NoError(t, err)
+
+	assert.Equal(t, original.Name, roundTrip.Name)
+	assert.Equal(t, original.Params["int_val"], roundTrip.Params["int_val"])
+	assert.Equal(t, original.Params["float_val"], roundTrip.Params["float_val"])
+	assert.Equal(t, original.Params["str_val"], roundTrip.Params["str_val"])
+	assert.Equal(t, original.Params["bool_val"], roundTrip.Params["bool_val"])
+	assert.Equal(t, original.Params["null_val"], roundTrip.Params["null_val"])
+
+	// 嵌套 struct
+	origNested := original.Params["nested"].(map[string]interface{})
+	rtNested := roundTrip.Params["nested"].(map[string]interface{})
+	assert.Equal(t, origNested["inner"], rtNested["inner"])
+
+	// 列表
+	origList := original.Params["list_val"].([]interface{})
+	rtList := roundTrip.Params["list_val"].([]interface{})
+	assert.Equal(t, origList, rtList)
 }

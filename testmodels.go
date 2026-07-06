@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"google.golang.org/protobuf/runtime/protoimpl"
+	"google.golang.org/protobuf/types/known/structpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 )
@@ -316,4 +317,21 @@ type TestModelNoPbmoTag struct {
 type TestPBNoPbmoTag struct {
 	Key  int32
 	Name string
+}
+
+// TestMapStructModel 测试 map[string]any ↔ *structpb.Struct 的 Model
+// 模拟 sqltypes.MapAny 字段场景
+type TestMapStructModel struct {
+	Name   string                 `json:"name"`
+	Params map[string]interface{} `json:"params"`
+}
+
+// TestMapStructPB 测试 map[string]any ↔ *structpb.Struct 的 PB
+// Params 对应 google.protobuf.Struct 类型字段
+type TestMapStructPB struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	Params        *structpb.Struct       `protobuf:"bytes,2,opt,name=params,proto3" json:"params,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }

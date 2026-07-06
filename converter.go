@@ -60,6 +60,7 @@ import (
 	"unsafe"
 
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/structpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 )
@@ -105,6 +106,7 @@ const (
 	fieldStringFallback                  // 字符串兜底转换（string 命名类型）
 	fieldSlice                           // 切片转换（需要逐元素递归，走 reflect 慢路径）
 	fieldMap                             // Map 转换（需要遍历 key/value，走 reflect 慢路径）
+	fieldMapStruct                       // map[string]any ↔ *structpb.Struct 转换（JSON 字段在持久化层与传输层间的映射）
 	fieldToPtr                           // 值→指针转换（T → *T，需要 reflect.New 分配）
 	fieldFromPtr                         // 指针→值解引用（*T → T，nil 检查后值拷贝）
 	fieldStruct                          // 值结构体转换（嵌套结构体，走缓存的 unsafe 快路径或 reflect）
@@ -2188,6 +2190,11 @@ func classifyField(srcType, dstType reflect.Type, autoTime bool) (fieldKind, *wr
 		return fieldConvertible, nil, 0
 	}
 
+	// map[string]any ↔ *structpb.Struct 特殊转换（先于 Slice/Map 通用分类，避免落入 fieldToPtr/fieldFromPtr）
+	if isMapStructPair(srcType, dstType) {
+		return fieldMapStruct, nil, 0
+	}
+
 	if srcKind == reflect.Slice && dstKind == reflect.Slice {
 		return fieldSlice, nil, 0
 	}
@@ -2292,36 +2299,6 @@ func lookupWrapper(srcType, dstType reflect.Type) (*wrapperConverter, int) {
 		return wc, 2
 	}
 	return nil, 0
-}
-
-// buildFieldNameMap 构建字段名映射：Model字段名 -> PB字段名
-func buildFieldNameMap(modelType, pbType reflect.Type, opts *Options) map[string]string {
-	nameMap := make(map[string]string)
-
-	if opts.TagMappingEnabled {
-		for i := 0; i < modelType.NumField(); i++ {
-			field := modelType.Field(i)
-			if !field.IsExported() {
-				continue
-			}
-			if tag := field.Tag.Get("pbmo"); tag != "" && tag != "-" {
-				nameMap[field.Name] = tag
-			} else if jtag := field.Tag.Get("json"); jtag != "" && jtag != "-" {
-				comma := strings.Index(jtag, ",")
-				if comma > 0 {
-					nameMap[field.Name] = jtag[:comma]
-				} else {
-					nameMap[field.Name] = jtag
-				}
-			}
-		}
-	}
-
-	for modelField, pbField := range opts.FieldMapping {
-		nameMap[modelField] = pbField
-	}
-
-	return nameMap
 }
 
 // buildFieldCache 构建 PB↔Model 字段缓存，核心的预计算引擎
@@ -2569,16 +2546,6 @@ func buildMergedCopyFunc(entries []fieldMappingEntry) func(srcBase, dstBase unsa
 			fns[i](srcBase, dstBase)
 		}
 	}
-}
-
-// hasPbmoTag 检查类型是否有 pbmo tag
-func hasPbmoTag(t reflect.Type) bool {
-	for i := 0; i < t.NumField(); i++ {
-		if t.Field(i).Tag.Get("pbmo") != "" {
-			return true
-		}
-	}
-	return false
 }
 
 // buildStructFieldCache 构建嵌套结构体的字段缓存
@@ -3170,6 +3137,8 @@ func convertFastEntryByReflect(srcField, dstField reflect.Value, entry *fieldMap
 		return convertSlice(srcField, dstField)
 	case fieldMap:
 		return convertMap(srcField, dstField)
+	case fieldMapStruct:
+		return convertMapStruct(srcField, dstField)
 	case fieldToPtr:
 		convertToPtr(srcField, dstField)
 	case fieldFromPtr:
@@ -3260,6 +3229,8 @@ func convertFieldByKind(srcField, dstField reflect.Value, entry *fieldMappingEnt
 		return convertSlice(srcField, dstField)
 	case fieldMap:
 		return convertMap(srcField, dstField)
+	case fieldMapStruct:
+		return convertMapStruct(srcField, dstField)
 	case fieldToPtr:
 		convertToPtr(srcField, dstField)
 	case fieldFromPtr:
@@ -3415,6 +3386,68 @@ func convertMap(srcField, dstField reflect.Value) error {
 	}
 
 	dstField.Set(dstMap)
+	return nil
+}
+
+// structPtrType *structpb.Struct 的反射类型缓存，避免重复反射
+var structPtrType = reflect.TypeOf((*structpb.Struct)(nil))
+
+// IsStructPtrType 判断是否为 *structpb.Struct 类型
+func IsStructPtrType(t reflect.Type) bool {
+	return t == structPtrType
+}
+
+// isMapStructPair 判断 src/dst 类型对是否为 map[string]any ↔ *structpb.Struct
+// 要求 map 的 key 为 string 类型（与 structpb.Struct 的 key 语义一致）
+func isMapStructPair(srcType, dstType reflect.Type) bool {
+	// map[string]any → *structpb.Struct
+	if srcType.Kind() == reflect.Map && dstType == structPtrType {
+		return srcType.Key().Kind() == reflect.String
+	}
+	// *structpb.Struct → map[string]any
+	if srcType == structPtrType && dstType.Kind() == reflect.Map {
+		return dstType.Key().Kind() == reflect.String
+	}
+	return false
+}
+
+// convertMapStruct 处理 map[string]any ↔ *structpb.Struct 双向转换
+// 方向由 srcField/dstField 的类型自动判断：
+//   - src 为 Map、dst 为 *structpb.Struct → map → struct
+//   - src 为 *structpb.Struct、dst 为 Map → struct → map
+func convertMapStruct(srcField, dstField reflect.Value) error {
+	// map[string]any → *structpb.Struct
+	if srcField.Kind() == reflect.Map && dstField.Type() == structPtrType {
+		if srcField.IsNil() {
+			dstField.Set(reflect.Zero(dstField.Type()))
+			return nil
+		}
+		// 遍历源 map 构造 map[string]interface{}，再交给 structpb.NewStruct
+		srcMap := make(map[string]interface{}, srcField.Len())
+		iter := srcField.MapRange()
+		for iter.Next() {
+			srcMap[iter.Key().String()] = iter.Value().Interface()
+		}
+		st, err := structpb.NewStruct(srcMap)
+		if err != nil {
+			return NewConversionError("map→struct 转换失败: %v", err)
+		}
+		dstField.Set(reflect.ValueOf(st))
+		return nil
+	}
+
+	// *structpb.Struct → map[string]any
+	if srcField.Type() == structPtrType && dstField.Kind() == reflect.Map {
+		if srcField.IsNil() {
+			dstField.Set(reflect.Zero(dstField.Type()))
+			return nil
+		}
+		st := srcField.Interface().(*structpb.Struct)
+		// AsMap 返回 map[string]interface{}，通过 reflect 创建中间 Value 后复用 convertMap
+		srcMapValue := reflect.ValueOf(st.AsMap())
+		return convertMap(srcMapValue, dstField)
+	}
+
 	return nil
 }
 
@@ -3817,6 +3850,11 @@ func convertFieldAuto(srcField, dstField reflect.Value) error {
 
 	if srcType.Kind() == reflect.Map && dstType.Kind() == reflect.Map {
 		return convertMap(srcField, dstField)
+	}
+
+	// map[string]any ↔ *structpb.Struct 特殊转换
+	if isMapStructPair(srcType, dstType) {
+		return convertMapStruct(srcField, dstField)
 	}
 
 	if srcType.Kind() == reflect.Ptr && dstType.Kind() != reflect.Ptr {
