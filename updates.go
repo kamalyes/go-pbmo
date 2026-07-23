@@ -18,9 +18,8 @@ import (
 	"reflect"
 	"strings"
 
+	"github.com/kamalyes/go-argus/validate"
 	"github.com/kamalyes/go-toolbox/pkg/serializer"
-	"github.com/kamalyes/go-toolbox/pkg/stringx"
-	"github.com/kamalyes/go-argus"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 )
 
@@ -236,9 +235,9 @@ func isEmptyUpdateValue(value interface{}) bool {
 	if str, ok := value.(string); ok {
 		return isEmptyUpdateString(str)
 	}
-	return validator.IsEmptyValue(reflect.ValueOf(value))
+	return validate.IsEmptyValue(reflect.ValueOf(value))
 }
 
 func isEmptyUpdateString(value string) bool {
-	return stringx.IsBlank(value) || validator.IfNullOrUndefined(value)
+	return validate.IsBlankString(value) || validate.IfNullOrUndefined(value)
 }
