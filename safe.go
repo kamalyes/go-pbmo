@@ -37,6 +37,12 @@ func (sc *SafeConverter) SafeConvertPBToModel(pb interface{}, modelPtr interface
 		return NewNilValueError("PB消息不能为空")
 	}
 
+	// 检测 typed-nil 指针（interface 非 nil 但底层指针为 nil）
+	pbVal := reflect.ValueOf(pb)
+	if pbVal.Kind() == reflect.Ptr && pbVal.IsNil() {
+		return NewNilValueError("PB消息无效")
+	}
+
 	sa := safe.Safe(pb)
 	if !sa.IsValid() {
 		return NewNilValueError("PB消息无效")
@@ -49,6 +55,12 @@ func (sc *SafeConverter) SafeConvertPBToModel(pb interface{}, modelPtr interface
 func (sc *SafeConverter) SafeConvertModelToPB(model interface{}, pbPtr interface{}) error {
 	if model == nil {
 		return NewNilValueError("Model不能为空")
+	}
+
+	// 检测 typed-nil 指针（interface 非 nil 但底层指针为 nil）
+	modelVal := reflect.ValueOf(model)
+	if modelVal.Kind() == reflect.Ptr && modelVal.IsNil() {
+		return NewNilValueError("Model无效")
 	}
 
 	sa := safe.Safe(model)

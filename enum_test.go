@@ -12,6 +12,7 @@
 package pbmo
 
 import (
+	"reflect"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -162,4 +163,55 @@ func TestConvertEnum(t *testing.T) {
 
 	result2 := ConvertEnum[int32, int32](mapper, int32(99), int32(-1))
 	assert.Equal(t, int32(-1), result2)
+}
+
+// TestEnumMapper_MapEnum 覆盖 MapEnum 反射方法的各分支
+func TestEnumMapper_MapEnum(t *testing.T) {
+	em := NewEnumMapper()
+	em.AddMapping(1, 100).AddMapping(2, 200)
+
+	// int 源枚举（已映射）
+	result, err := em.MapEnum(int(1), reflect.TypeOf(int32(0)), int32(0))
+	assert.NoError(t, err)
+	assert.Equal(t, int32(100), result.(int32))
+
+	// int32 源枚举（已映射）
+	result, err = em.MapEnum(int32(2), reflect.TypeOf(int32(0)), int32(0))
+	assert.NoError(t, err)
+	assert.Equal(t, int32(200), result.(int32))
+
+	// int64 源枚举（已映射）
+	result, err = em.MapEnum(int64(1), reflect.TypeOf(int32(0)), int32(0))
+	assert.NoError(t, err)
+	assert.Equal(t, int32(100), result.(int32))
+
+	// uint 源枚举（已映射）
+	result, err = em.MapEnum(uint(1), reflect.TypeOf(int32(0)), int32(0))
+	assert.NoError(t, err)
+	assert.Equal(t, int32(100), result.(int32))
+
+	// uint32 源枚举（已映射）
+	result, err = em.MapEnum(uint32(2), reflect.TypeOf(int32(0)), int32(0))
+	assert.NoError(t, err)
+	assert.Equal(t, int32(200), result.(int32))
+
+	// uint64 源枚举（已映射）
+	result, err = em.MapEnum(uint64(1), reflect.TypeOf(int32(0)), int32(0))
+	assert.NoError(t, err)
+	assert.Equal(t, int32(100), result.(int32))
+
+	// 未映射值 + 非空默认值（int32）→ 使用默认值
+	result, err = em.MapEnum(int(999), reflect.TypeOf(int32(0)), int32(42))
+	assert.NoError(t, err)
+	assert.Equal(t, int32(42), result.(int32))
+
+	// 未映射值 + nil 默认值 → targetInt 保持 0
+	result, err = em.MapEnum(int(999), reflect.TypeOf(int32(0)), nil)
+	assert.NoError(t, err)
+	assert.Equal(t, int32(0), result.(int32))
+
+	// 不支持的源类型（string）→ 返回错误和默认值
+	result, err = em.MapEnum("invalid", reflect.TypeOf(int32(0)), int32(0))
+	assert.Error(t, err)
+	assert.Equal(t, int32(0), result)
 }

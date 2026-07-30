@@ -197,3 +197,111 @@ func TestGlobalFunctions(t *testing.T) {
 
 	r.Clear()
 }
+
+// TestMustRegisterConverter 覆盖全局 MustRegisterConverter
+func TestMustRegisterConverter(t *testing.T) {
+	r := GlobalRegistry()
+	r.Clear()
+
+	bc := NewBidiConverter(TestSimplePB{}, TestSimpleModel{})
+	assert.NotPanics(t, func() {
+		MustRegisterConverter(bc)
+	})
+
+	r.Clear()
+}
+
+// TestMustRegisterConverter_Panic 覆盖 MustRegisterConverter 重复注册 panic
+func TestMustRegisterConverter_Panic(t *testing.T) {
+	r := GlobalRegistry()
+	r.Clear()
+
+	bc := NewBidiConverter(TestSimplePB{}, TestSimpleModel{})
+	MustRegisterConverter(bc)
+
+	assert.Panics(t, func() {
+		MustRegisterConverter(bc)
+	})
+
+	r.Clear()
+}
+
+// TestGetConverter 覆盖全局 GetConverter
+func TestGetConverter(t *testing.T) {
+	r := GlobalRegistry()
+	r.Clear()
+
+	bc := NewBidiConverter(TestSimplePB{}, TestSimpleModel{})
+	RegisterConverter(bc)
+
+	found, err := GetConverter(reflect.TypeOf(TestSimplePB{}), reflect.TypeOf(TestSimpleModel{}))
+	assert.NoError(t, err)
+	assert.Equal(t, bc, found)
+
+	// 未注册类型 → 返回错误
+	_, err = GetConverter(reflect.TypeOf(TestPB{}), reflect.TypeOf(TestModel{}))
+	assert.Error(t, err)
+
+	r.Clear()
+}
+
+// TestConvertModelToPB_Global 覆盖全局 ConvertModelToPB
+func TestConvertModelToPB_Global(t *testing.T) {
+	r := GlobalRegistry()
+	r.Clear()
+
+	bc := NewBidiConverter(TestSimplePB{}, TestSimpleModel{})
+	RegisterConverter(bc)
+
+	model := TestSimpleModel{Value: "global_m2p", Count: 55}
+	var pb TestSimplePB
+	err := ConvertModelToPB(model, &pb)
+	assert.NoError(t, err)
+	assert.Equal(t, "global_m2p", pb.Value)
+	assert.Equal(t, int32(55), pb.Count)
+
+	r.Clear()
+}
+
+// TestConvertModelToPB_Global_NotFound 覆盖全局 ConvertModelToPB 未注册的错误分支
+func TestConvertModelToPB_Global_NotFound(t *testing.T) {
+	r := GlobalRegistry()
+	r.Clear()
+
+	model := TestSimpleModel{Value: "x"}
+	var pb TestSimplePB
+	err := ConvertModelToPB(model, &pb)
+	assert.Error(t, err)
+
+	r.Clear()
+}
+
+// TestRegistry_ConvertPBToModel_NotFound 覆盖 Registry.ConvertPBToModel 未注册错误分支
+func TestRegistry_ConvertPBToModel_NotFound(t *testing.T) {
+	r := NewRegistry()
+	pb := TestSimplePB{Value: "x"}
+	var model TestSimpleModel
+	err := r.ConvertPBToModel(pb, &model)
+	assert.Error(t, err)
+}
+
+// TestRegistry_ConvertModelToPB_NotFound 覆盖 Registry.ConvertModelToPB 未注册错误分支
+func TestRegistry_ConvertModelToPB_NotFound(t *testing.T) {
+	r := NewRegistry()
+	model := TestSimpleModel{Value: "x"}
+	var pb TestSimplePB
+	err := r.ConvertModelToPB(model, &pb)
+	assert.Error(t, err)
+}
+
+// TestRegistry_Count 覆盖 Count 方法
+func TestRegistry_Count(t *testing.T) {
+	r := NewRegistry()
+	assert.Equal(t, 0, r.Count())
+
+	bc1 := NewBidiConverter(TestSimplePB{}, TestSimpleModel{})
+	bc2 := NewBidiConverter(TestPB{}, TestModel{})
+	_ = r.Register(bc1)
+	_ = r.Register(bc2)
+	assert.Equal(t, 2, r.Count())
+}

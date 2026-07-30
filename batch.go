@@ -142,7 +142,7 @@ func (bc *BidiConverter) convertPBToModelCached(pbVal, modelVal reflect.Value, c
 			if !srcField.IsValid() || !dstField.IsValid() || !dstField.CanSet() {
 				continue
 			}
-			if err := convertFastEntryByReflect(srcField, dstField, entry); err != nil {
+			if err := convertFieldByKind(srcField, dstField, entry); err != nil {
 				return NewConversionError("字段 %s 转换失败: %v", entry.srcName, err)
 			}
 		}
@@ -233,7 +233,7 @@ func (bc *BidiConverter) convertModelToPBCached(modelVal, pbVal reflect.Value, c
 			if !srcField.IsValid() || !dstField.IsValid() || !dstField.CanSet() {
 				continue
 			}
-			if err := convertFastEntryByReflect(srcField, dstField, entry); err != nil {
+			if err := convertFieldByKind(srcField, dstField, entry); err != nil {
 				return NewConversionError("字段 %s 转换失败: %v", entry.srcName, err)
 			}
 		}

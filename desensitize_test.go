@@ -22,7 +22,14 @@ import (
 type DesensitizeTestModel struct {
 	Name  string `desensitize:"name"`
 	Email string `desensitize:"email"`
-	Phone string `desensitize:"phone"`
+	Phone string `desensitize:"phoneNumber"`
+}
+
+// DesensitizeTestPB 与 DesensitizeTestModel 对应的 PB
+type DesensitizeTestPB struct {
+	Name  string
+	Email string
+	Phone string
 }
 
 func TestNewDesensitizeConverter(t *testing.T) {

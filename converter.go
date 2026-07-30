@@ -18,16 +18,20 @@
  *
  * 【第一层：预计算（初始化时一次性完成）】
  *   - classifyField：在首次转换时对每个字段进行类型分类（fieldKind）
- *   - buildFieldCache：预计算每个字段的 srcOffset/dstOffset，生成 copyFunc 闭包
+ *   - buildFieldCache / buildStructFieldCache：预计算每个字段的 srcOffset/dstOffset，
+ *     生成 copyFunc 闭包；structFieldCache 额外携带 srcType/dstType 供慢速路径定位字段
  *   - 将字段分为 fastEntries（有 copyFunc）和 slowEntries（需 reflect 回退）
- *   - 合并所有 fastEntries 的 copyFunc 为 mergedCopyFunc（单次闭包调用）
+ *   - 合并所有 fastEntries 的 copyFunc 为 mergedCopyFunc（单次闭包调用），
+ *     嵌套结构体则合并为 structFieldCache.mergedFn
  *
  * 【第二层：快速路径（运行时热路径，O(N) 次指针操作）】
- *   - ConvertPBToModel / ConvertModelToPB 的热路径：
+ *   - ConvertPBToModel / ConvertModelToPB 统一委托给 convertWithCache 处理两个方向：
  *     1. reflect.ValueOf 获取结构体指针 + UnsafeAddr 获取基地址
  *     2. 若无 Transformer 且 mergedCopyFunc 存在 → 单次调用完成所有 fast 字段拷贝
  *     3. 否则逐个 fastEntries[i].copyFunc(srcBase, dstBase)
  *   - 每个 copyFunc 是闭包，捕获了 srcOffset/dstOffset，直接操作内存
+ *   - 嵌套结构体的 make*CopyFunc 闭包通过 applyStructSlowEntriesUnsafe 统一处理
+ *     其子缓存的 slowEntries，消除 7 处重复的 reflect.NewAt + FieldByIndex 模板
  *   - 支持：同类型拷贝、整数转换、时间戳↔时间、Wrapper 指针、
  *           结构体嵌套、结构体指针嵌套、值→指针、指针→值 等
  *
@@ -35,7 +39,8 @@
  *   - 对于无法生成 copyFunc 的字段（slice、map、复杂嵌套等）
  *   - 使用 convertFieldByKind 分发到对应的 reflect 处理函数
  *   - 嵌套结构体使用 globalStructFieldCache 缓存，避免重复构建映射
- *   - convertStructPtr / convertStruct 会优先查找缓存的 structFieldCache
+ *   - convertStruct / convertStructPtr / convertStructWithCache 共用
+ *     applyStructFieldCacheReflect 处理 CanAddr 快速路径与 reflect 回退
  *
  * 性能对比（vs 原生手写）：
  *   - Simple PBToModel: 3-4x（vs 原生 1x）
@@ -168,6 +173,8 @@ type structFieldEntry struct {
 // structFieldCache 嵌套结构体字段缓存
 // 通过 globalStructFieldCache 缓存，避免每次嵌套转换重复构建映射
 type structFieldCache struct {
+	srcType     reflect.Type                          // 源结构体类型（用于 reflect.NewAt 定位字段）
+	dstType     reflect.Type                          // 目标结构体类型
 	fastEntries []structFieldEntry                    // 快速路径字段
 	slowEntries []structFieldEntry                    // 慢速路径字段
 	autoTime    bool                                  // 是否自动时间转换
@@ -232,7 +239,7 @@ func (bc *BidiConverter) applyFastPath(cache *fieldCache, srcBase, dstBase unsaf
 			if !srcField.IsValid() || !dstField.IsValid() || !dstField.CanSet() {
 				continue
 			}
-			if err := convertFastEntryByReflect(srcField, dstField, entry); err != nil {
+			if err := convertFieldByKind(srcField, dstField, entry); err != nil {
 				return NewConversionError("字段 %s 转换失败: %v", entry.srcName, err)
 			}
 		}
@@ -928,6 +935,7 @@ func makeConvertibleCopyFunc(srcType, dstType reflect.Type, srcOffset, dstOffset
 //   - fieldStructPtr              → makeStructPtrCopyFunc（嵌套结构体指针，使用子缓存）
 //   - fieldStruct                 → makeStructCopyFunc（嵌套值结构体，使用子缓存）
 //   - fieldSlice                 → makeSliceCopyFunc（切片逐元素转换，使用元素级 copyFunc）
+//   - fieldMapStruct             → makeMapStructCopyFunc（map[string]any → *structpb.Struct，跳过反射）
 //   - fieldMap/fieldNoop         → 返回 nil，走 reflect 慢路径
 func makeFieldCopyFunc(kind fieldKind, srcType, dstType reflect.Type, srcOffset, dstOffset uintptr, wc *wrapperConverter, wrapperDir int) fieldCopyFunc {
 	switch kind {
@@ -968,6 +976,64 @@ func makeFieldCopyFunc(kind fieldKind, srcType, dstType reflect.Type, srcOffset,
 		return makeSliceCopyFunc(srcType, dstType, srcOffset, dstOffset)
 	case fieldMap:
 		return makeMapCopyFunc(srcType, dstType, srcOffset, dstOffset)
+	case fieldMapStruct:
+		return makeMapStructCopyFunc(srcType, dstType, srcOffset, dstOffset)
+	}
+	return nil
+}
+
+// makeMapStructCopyFunc 生成 map[string]any → *structpb.Struct 的 unsafe 快速路径 copyFunc
+// 设计思想：fieldMapStruct 字段原先无 copyFunc，落入 slowEntries 经 convertMapStruct 反射处理，
+// 每次都要 srcField.Type().ConvertibleTo() + srcField.Convert() + .Interface() + dstField.Set() 等反射开销
+// 本函数在构建缓存时预判方向，直接生成 unsafe 指针闭包，跳过全部反射路径
+//
+// 支持方向（Model→PB 热路径）：
+//  1. map[string][]string → *structpb.Struct  直接 buildStructFromMapStringSlice（永不失败）
+//  2. map[string]interface{} → *structpb.Struct  先 structpb.NewStruct，失败时 normalizeValue 兜底
+//
+// 反向 *structpb.Struct → map 及其他复杂场景返回 nil，沿用 convertMapStruct 反射慢路径
+func makeMapStructCopyFunc(srcType, dstType reflect.Type, srcOffset, dstOffset uintptr) fieldCopyFunc {
+	if srcType.Kind() != reflect.Map || dstType != structPtrType {
+		return nil
+	}
+	// 快路径 1：map[string][]string（含 CompressedTextMap 等命名类型），直接构建 structpb.Struct
+	// buildStructFromMapStringSlice 不会返回错误，可安全跳过反射全部开销
+	if srcType.ConvertibleTo(mapStringSliceType) {
+		return func(srcBase, dstBase unsafe.Pointer) {
+			m := *(*map[string][]string)(addPtr(srcBase, srcOffset))
+			if m == nil {
+				*(**structpb.Struct)(addPtr(dstBase, dstOffset)) = nil
+				return
+			}
+			*(**structpb.Struct)(addPtr(dstBase, dstOffset)) = buildStructFromMapStringSlice(m)
+		}
+	}
+	// 快路径 2：map[string]interface{}，先尝试 buildStructFromMapAny 批量预分配路径
+	// 失败时（值含非扁平类型或非法类型）才走 normalizeValue 逐项修复 + structpb.NewStruct
+	if srcType.ConvertibleTo(mapStringAnyType) {
+		return func(srcBase, dstBase unsafe.Pointer) {
+			m := *(*map[string]interface{})(addPtr(srcBase, srcOffset))
+			if m == nil {
+				*(**structpb.Struct)(addPtr(dstBase, dstOffset)) = nil
+				return
+			}
+			st, err := buildStructFromMapAny(m)
+			if err == nil && st != nil {
+				*(**structpb.Struct)(addPtr(dstBase, dstOffset)) = st
+				return
+			}
+			// 兜底：normalizeValue 归一化后 structpb.NewStruct
+			normalized := make(map[string]interface{}, len(m))
+			for k, v := range m {
+				normalized[k] = normalizeValue(v)
+			}
+			if st, err = structpb.NewStruct(normalized); err != nil {
+				// 值类型非法（chan/func 等），copyFunc 签名不支持 error，置 nil 与零值语义一致
+				*(**structpb.Struct)(addPtr(dstBase, dstOffset)) = nil
+				return
+			}
+			*(**structpb.Struct)(addPtr(dstBase, dstOffset)) = st
+		}
 	}
 	return nil
 }
@@ -1026,17 +1092,7 @@ func makeStructPtrCopyFunc(srcType, dstType reflect.Type, srcOffset, dstOffset u
 			for i := range fastFns {
 				fastFns[i](srcPtr, dstPtr)
 			}
-			dstVal := dstPtrVal.Elem()
-			srcVal := reflect.NewAt(srcElemType, srcPtr).Elem()
-			for i := range sc.slowEntries {
-				entry := &sc.slowEntries[i]
-				srcField := srcVal.FieldByIndex(entry.srcIndex)
-				dstField := dstVal.FieldByIndex(entry.dstIndex)
-				if !srcField.IsValid() || !dstField.IsValid() {
-					continue
-				}
-				convertStructFieldSlow(srcField, dstField, entry)
-			}
+			applyStructSlowEntriesUnsafe(srcPtr, dstPtr, sc)
 		}
 	}
 
@@ -1080,17 +1136,7 @@ func makeStructCopyFunc(srcType, dstType reflect.Type, srcOffset, dstOffset uint
 		for i := range fastFns {
 			fastFns[i](srcPtr, dstPtr)
 		}
-		srcVal := reflect.NewAt(srcType, srcPtr).Elem()
-		dstVal := reflect.NewAt(dstType, dstPtr).Elem()
-		for i := range sc.slowEntries {
-			entry := &sc.slowEntries[i]
-			srcField := srcVal.FieldByIndex(entry.srcIndex)
-			dstField := dstVal.FieldByIndex(entry.dstIndex)
-			if !srcField.IsValid() || !dstField.IsValid() {
-				continue
-			}
-			convertStructFieldSlow(srcField, dstField, entry)
-		}
+		applyStructSlowEntriesUnsafe(srcPtr, dstPtr, sc)
 	}
 }
 
@@ -1262,17 +1308,7 @@ func makeSliceCopyFunc(srcType, dstType reflect.Type, srcOffset, dstOffset uintp
 					for j := range fastFns {
 						fastFns[j](srcPtr, dstElemPtr)
 					}
-					srcElemVal := reflect.NewAt(srcInnerType, srcPtr).Elem()
-					dstElemVal := reflect.NewAt(dstInnerType, dstElemPtr).Elem()
-					for j := range sc.slowEntries {
-						entry := &sc.slowEntries[j]
-						s := srcElemVal.FieldByIndex(entry.srcIndex)
-						d := dstElemVal.FieldByIndex(entry.dstIndex)
-						if !s.IsValid() || !d.IsValid() {
-							continue
-						}
-						convertStructFieldSlow(s, d, entry)
-					}
+					applyStructSlowEntriesUnsafe(srcPtr, dstElemPtr, sc)
 					*(*unsafe.Pointer)(addPtr(dstData, uintptr(i)*PtrSize)) = dstElemPtr
 				}
 				*(*sliceHeader)(addPtr(dstBase, dstOffset)) = sliceHeader{
@@ -1347,17 +1383,7 @@ func makeSliceCopyFunc(srcType, dstType reflect.Type, srcOffset, dstOffset uintp
 					for j := range fastFns {
 						fastFns[j](srcElemPtr, dstElemPtr)
 					}
-					srcElemVal := reflect.NewAt(srcElemType, srcElemPtr).Elem()
-					dstElemVal := reflect.NewAt(dstElemType, dstElemPtr).Elem()
-					for j := range sc.slowEntries {
-						entry := &sc.slowEntries[j]
-						s := srcElemVal.FieldByIndex(entry.srcIndex)
-						d := dstElemVal.FieldByIndex(entry.dstIndex)
-						if !s.IsValid() || !d.IsValid() {
-							continue
-						}
-						convertStructFieldSlow(s, d, entry)
-					}
+					applyStructSlowEntriesUnsafe(srcElemPtr, dstElemPtr, sc)
 				}
 				*(*sliceHeader)(addPtr(dstBase, dstOffset)) = sliceHeader{
 					Data: dstSlice.UnsafePointer(), Len: srcSlice.Len, Cap: srcSlice.Len,
@@ -1750,6 +1776,8 @@ func convertStructFieldSlow(srcField, dstField reflect.Value, entry *structField
 		convertSlice(srcField, dstField)
 	case fieldMap:
 		convertMap(srcField, dstField)
+	case fieldMapStruct:
+		convertMapStruct(srcField, dstField)
 	case fieldToPtr:
 		convertToPtr(srcField, dstField)
 	case fieldFromPtr:
@@ -1980,17 +2008,7 @@ func makeToPtrCopyFunc(srcType, dstType reflect.Type, srcOffset, dstOffset uintp
 				for i := range fastFns {
 					fastFns[i](srcAddr, dstPtr)
 				}
-				srcVal := reflect.NewAt(srcType, srcAddr).Elem()
-				dstVal := dstPtrVal.Elem()
-				for i := range sc.slowEntries {
-					entry := &sc.slowEntries[i]
-					s := srcVal.FieldByIndex(entry.srcIndex)
-					d := dstVal.FieldByIndex(entry.dstIndex)
-					if !s.IsValid() || !d.IsValid() {
-						continue
-					}
-					convertStructFieldSlow(s, d, entry)
-				}
+				applyStructSlowEntriesUnsafe(srcAddr, dstPtr, sc)
 				*(*unsafe.Pointer)(addPtr(dstBase, dstOffset)) = dstPtr
 			}
 		}
@@ -2055,17 +2073,7 @@ func makeFromPtrCopyFunc(srcType, dstType reflect.Type, srcOffset, dstOffset uin
 				for i := range fastFns {
 					fastFns[i](srcPtr, dstAddr)
 				}
-				srcVal := reflect.NewAt(elemType, srcPtr).Elem()
-				dstVal := reflect.NewAt(dstType, dstAddr).Elem()
-				for i := range sc.slowEntries {
-					entry := &sc.slowEntries[i]
-					s := srcVal.FieldByIndex(entry.srcIndex)
-					d := dstVal.FieldByIndex(entry.dstIndex)
-					if !s.IsValid() || !d.IsValid() {
-						continue
-					}
-					convertStructFieldSlow(s, d, entry)
-				}
+				applyStructSlowEntriesUnsafe(srcPtr, dstAddr, sc)
 			}
 		}
 	}
@@ -2459,19 +2467,16 @@ func buildFieldCache(srcType, dstType reflect.Type, srcIsModel bool, opts *Optio
 	}
 }
 
-// buildMergedCopyFunc 将所有快速路径的 copyFunc 合并为单个闭包
+// buildMergedCopyFuncFromFns 将 copyFunc 列表合并为单个闭包
 // 设计思想：N 个 fastEntries 意味着 N 次间接函数调用，合并为单个闭包后
 // 只需一次调用，减少间接调用开销，并为编译器内联优化创造条件
+// 通过 switch len 展开 1-8 个函数的直接调用，超过 8 个回退到循环
+// buildMergedCopyFunc 和 buildStructMergedCopyFunc 共用此核心逻辑
 // 性能影响：对于 Simple（4个 fast 字段）等小型结构体，约 5-10% 的额外提升
-func buildMergedCopyFunc(entries []fieldMappingEntry) func(srcBase, dstBase unsafe.Pointer) {
-	if len(entries) == 0 {
-		return nil
-	}
-	fns := make([]fieldCopyFunc, len(entries))
-	for i := range entries {
-		fns[i] = entries[i].copyFunc
-	}
+func buildMergedCopyFuncFromFns(fns []fieldCopyFunc) func(srcBase, dstBase unsafe.Pointer) {
 	switch len(fns) {
+	case 0:
+		return nil
 	case 1:
 		f0 := fns[0]
 		return func(srcBase, dstBase unsafe.Pointer) {
@@ -2546,6 +2551,16 @@ func buildMergedCopyFunc(entries []fieldMappingEntry) func(srcBase, dstBase unsa
 			fns[i](srcBase, dstBase)
 		}
 	}
+}
+
+// buildMergedCopyFunc 将所有快速路径的 copyFunc 合并为单个闭包
+// 提取 copyFunc 列表后委托给 buildMergedCopyFuncFromFns
+func buildMergedCopyFunc(entries []fieldMappingEntry) func(srcBase, dstBase unsafe.Pointer) {
+	fns := make([]fieldCopyFunc, len(entries))
+	for i := range entries {
+		fns[i] = entries[i].copyFunc
+	}
+	return buildMergedCopyFuncFromFns(fns)
 }
 
 // buildStructFieldCache 构建嵌套结构体的字段缓存
@@ -2613,6 +2628,8 @@ func buildStructFieldCache(srcType, dstType reflect.Type, autoTime bool) *struct
 	mergedFn := buildStructMergedCopyFunc(fastEntries)
 
 	return &structFieldCache{
+		srcType:     srcType,
+		dstType:     dstType,
 		fastEntries: fastEntries,
 		slowEntries: slowEntries,
 		autoTime:    autoTime,
@@ -2621,90 +2638,13 @@ func buildStructFieldCache(srcType, dstType reflect.Type, autoTime bool) *struct
 }
 
 // buildStructMergedCopyFunc 将嵌套结构体的快速路径 copyFunc 合并为单个闭包
-// 与 buildMergedCopyFunc 类似，但用于 structFieldCache
+// 与 buildMergedCopyFunc 类似，但用于 structFieldCache，委托给 buildMergedCopyFuncFromFns
 func buildStructMergedCopyFunc(entries []structFieldEntry) func(srcBase, dstBase unsafe.Pointer) {
-	if len(entries) == 0 {
-		return nil
-	}
 	fns := make([]fieldCopyFunc, len(entries))
 	for i := range entries {
 		fns[i] = entries[i].copyFunc
 	}
-	switch len(fns) {
-	case 1:
-		f0 := fns[0]
-		return func(srcBase, dstBase unsafe.Pointer) {
-			f0(srcBase, dstBase)
-		}
-	case 2:
-		f0, f1 := fns[0], fns[1]
-		return func(srcBase, dstBase unsafe.Pointer) {
-			f0(srcBase, dstBase)
-			f1(srcBase, dstBase)
-		}
-	case 3:
-		f0, f1, f2 := fns[0], fns[1], fns[2]
-		return func(srcBase, dstBase unsafe.Pointer) {
-			f0(srcBase, dstBase)
-			f1(srcBase, dstBase)
-			f2(srcBase, dstBase)
-		}
-	case 4:
-		f0, f1, f2, f3 := fns[0], fns[1], fns[2], fns[3]
-		return func(srcBase, dstBase unsafe.Pointer) {
-			f0(srcBase, dstBase)
-			f1(srcBase, dstBase)
-			f2(srcBase, dstBase)
-			f3(srcBase, dstBase)
-		}
-	case 5:
-		f0, f1, f2, f3, f4 := fns[0], fns[1], fns[2], fns[3], fns[4]
-		return func(srcBase, dstBase unsafe.Pointer) {
-			f0(srcBase, dstBase)
-			f1(srcBase, dstBase)
-			f2(srcBase, dstBase)
-			f3(srcBase, dstBase)
-			f4(srcBase, dstBase)
-		}
-	case 6:
-		f0, f1, f2, f3, f4, f5 := fns[0], fns[1], fns[2], fns[3], fns[4], fns[5]
-		return func(srcBase, dstBase unsafe.Pointer) {
-			f0(srcBase, dstBase)
-			f1(srcBase, dstBase)
-			f2(srcBase, dstBase)
-			f3(srcBase, dstBase)
-			f4(srcBase, dstBase)
-			f5(srcBase, dstBase)
-		}
-	case 7:
-		f0, f1, f2, f3, f4, f5, f6 := fns[0], fns[1], fns[2], fns[3], fns[4], fns[5], fns[6]
-		return func(srcBase, dstBase unsafe.Pointer) {
-			f0(srcBase, dstBase)
-			f1(srcBase, dstBase)
-			f2(srcBase, dstBase)
-			f3(srcBase, dstBase)
-			f4(srcBase, dstBase)
-			f5(srcBase, dstBase)
-			f6(srcBase, dstBase)
-		}
-	case 8:
-		f0, f1, f2, f3, f4, f5, f6, f7 := fns[0], fns[1], fns[2], fns[3], fns[4], fns[5], fns[6], fns[7]
-		return func(srcBase, dstBase unsafe.Pointer) {
-			f0(srcBase, dstBase)
-			f1(srcBase, dstBase)
-			f2(srcBase, dstBase)
-			f3(srcBase, dstBase)
-			f4(srcBase, dstBase)
-			f5(srcBase, dstBase)
-			f6(srcBase, dstBase)
-			f7(srcBase, dstBase)
-		}
-	}
-	return func(srcBase, dstBase unsafe.Pointer) {
-		for i := range fns {
-			fns[i](srcBase, dstBase)
-		}
-	}
+	return buildMergedCopyFuncFromFns(fns)
 }
 
 // Converter 双向转换器接口
@@ -2721,7 +2661,6 @@ type BidiConverter struct {
 	modelType      reflect.Type
 	options        *Options
 	transformers   *TransformerRegistry
-	validator      *Validator
 	pbToModelCache *fieldCache
 	modelToPBCache *fieldCache
 	pbToModelPtr   atomic.Pointer[fieldCache]
@@ -2746,7 +2685,6 @@ func NewBidiConverter(pbType, modelType interface{}, opts ...Option) *BidiConver
 		modelType:    modelReflectType,
 		options:      options,
 		transformers: NewTransformerRegistry(),
-		validator:    NewValidator(),
 		structCache:  make(map[structFieldTypePair]*structFieldCache),
 	}
 }
@@ -2852,11 +2790,6 @@ func (bc *BidiConverter) GetPBType() reflect.Type {
 	return bc.pbType
 }
 
-// GetValidator 获取校验器
-func (bc *BidiConverter) GetValidator() *Validator {
-	return bc.validator
-}
-
 // GetTransformers 获取转换器注册表
 func (bc *BidiConverter) GetTransformers() *TransformerRegistry {
 	return bc.transformers
@@ -2908,6 +2841,54 @@ func (bc *BidiConverter) ensureFieldCache() {
 }
 
 // ConvertPBToModel 将 PB 消息转换为 Model（核心热路径）
+// 入参校验后委托给 convertWithCache，三层加速策略详见 convertWithCache 注释
+func (bc *BidiConverter) ConvertPBToModel(pb, modelPtr interface{}) error {
+	if pb == nil || modelPtr == nil {
+		return nil
+	}
+
+	pbVal := reflect.ValueOf(pb)
+	modelVal := reflect.ValueOf(modelPtr)
+
+	if modelVal.Kind() != reflect.Ptr || modelVal.IsNil() {
+		return ErrMustBePointer
+	}
+	modelVal = modelVal.Elem()
+
+	if pbVal.Kind() == reflect.Ptr {
+		pbVal = pbVal.Elem()
+	}
+
+	return bc.convertWithCache(pbVal, modelVal, bc.pbToModelFieldCache(), pb)
+}
+
+// ConvertModelToPB 将 Model 转换为 PB 消息（核心热路径）
+// 与 ConvertPBToModel 对称，方向为 Model → PB，委托给 convertWithCache
+func (bc *BidiConverter) ConvertModelToPB(model, pbPtr interface{}) error {
+	if model == nil || pbPtr == nil {
+		return nil
+	}
+
+	modelVal := reflect.ValueOf(model)
+	pbVal := reflect.ValueOf(pbPtr)
+
+	if pbVal.Kind() != reflect.Ptr || pbVal.IsNil() {
+		return ErrMustBePointer
+	}
+	pbVal = pbVal.Elem()
+
+	if modelVal.Kind() == reflect.Ptr {
+		if modelVal.IsNil() {
+			return nil
+		}
+		modelVal = modelVal.Elem()
+	}
+
+	return bc.convertWithCache(modelVal, pbVal, bc.modelToPBFieldCache(), model)
+}
+
+// convertWithCache 执行 srcVal → dstVal 的转换，应用三层加速策略
+// 这是 ConvertPBToModel 和 ConvertModelToPB 的共用核心逻辑
 //
 // 执行流程（三层加速策略）：
 //
@@ -2926,60 +2907,44 @@ func (bc *BidiConverter) ensureFieldCache() {
 // 【第三层：reflect 回退路径】（最慢，但覆盖所有场景）
 //
 //	条件：值不可寻址（canFastPath=false）
-//	执行：逐个 fastEntry 用 FieldByIndex + convertFastEntryByReflect
+//	执行：逐个 fastEntry 用 FieldByIndex + convertFieldByKind
 //	      逐个 slowEntry 用 FieldByIndex + convertFieldByKind
 //	性能：约 3-5x 原生（无 unsafe 优化）
 //
 // hasTransformers 标志在 buildFieldCache 时预计算，避免每次调用 transformers.Count()
-func (bc *BidiConverter) ConvertPBToModel(pb, modelPtr interface{}) error {
-	if pb == nil || modelPtr == nil {
-		return nil
-	}
-
-	pbVal := reflect.ValueOf(pb)
-	modelVal := reflect.ValueOf(modelPtr)
-
-	if modelVal.Kind() != reflect.Ptr || modelVal.IsNil() {
-		return ErrMustBePointer
-	}
-
-	modelVal = modelVal.Elem()
-
-	if pbVal.Kind() == reflect.Ptr {
-		pbVal = pbVal.Elem()
-	}
-
-	cache := bc.pbToModelFieldCache()
-
-	// 如果 pbVal 不可寻址（值类型传入 interface{}），尝试通过 interface{} 内部布局获取基地址
+//
+// srcInterface 是 srcVal 对应的原始 interface{}，用于 ifaceDataPtr 路径
+// （当 srcVal 不可寻址时，通过 interface{} 内部布局提取基地址）
+func (bc *BidiConverter) convertWithCache(srcVal, dstVal reflect.Value, cache *fieldCache, srcInterface interface{}) error {
+	// 如果 srcVal 不可寻址（值类型传入 interface{}），尝试通过 interface{} 内部布局获取基地址
 	// 对于 struct 类型且大小 > ptrSize，interface{} 中的 data 指针指向堆上的副本
 	// 对于小 struct（大小 <= ptrSize），data 可能直接存储值，不安全使用
 	// 仅在类型与 cache 匹配时才走此路径，避免方向不匹配导致错误
-	if !pbVal.CanAddr() && pbVal.Kind() == reflect.Struct && pbVal.Type() == cache.srcType {
-		if pbVal.Type().Size() > uintptr(unsafe.Sizeof(uintptr(0))) {
-			if srcBase := ifaceDataPtr(pb); srcBase != nil {
-				dstBase := unsafe.Pointer(modelVal.UnsafeAddr())
-				if err := bc.applyFastPath(cache, srcBase, dstBase, pbVal, modelVal); err != nil {
+	if !srcVal.CanAddr() && srcVal.Kind() == reflect.Struct && srcVal.Type() == cache.srcType {
+		if srcVal.Type().Size() > uintptr(unsafe.Sizeof(uintptr(0))) {
+			if srcBase := ifaceDataPtr(srcInterface); srcBase != nil {
+				dstBase := unsafe.Pointer(dstVal.UnsafeAddr())
+				if err := bc.applyFastPath(cache, srcBase, dstBase, srcVal, dstVal); err != nil {
 					return err
 				}
-				return bc.applySlowEntries(cache, pbVal, modelVal)
+				return bc.applySlowEntries(cache, srcVal, dstVal)
 			}
 		}
 	}
 
-	canFastPath := pbVal.CanAddr() && modelVal.CanAddr()
+	canFastPath := srcVal.CanAddr() && dstVal.CanAddr()
 
 	if canFastPath && cache.mergedCopyFunc != nil && !cache.hasTransformers {
-		srcBase := unsafe.Pointer(pbVal.UnsafeAddr())
-		dstBase := unsafe.Pointer(modelVal.UnsafeAddr())
+		srcBase := unsafe.Pointer(srcVal.UnsafeAddr())
+		dstBase := unsafe.Pointer(dstVal.UnsafeAddr())
 		cache.mergedCopyFunc(srcBase, dstBase)
 
 		if len(cache.slowEntries) == 0 {
 			return nil
 		}
 	} else if canFastPath && len(cache.fastEntries) > 0 {
-		srcBase := unsafe.Pointer(pbVal.UnsafeAddr())
-		dstBase := unsafe.Pointer(modelVal.UnsafeAddr())
+		srcBase := unsafe.Pointer(srcVal.UnsafeAddr())
+		dstBase := unsafe.Pointer(dstVal.UnsafeAddr())
 		if cache.mergedCopyFunc != nil {
 			cache.mergedCopyFunc(srcBase, dstBase)
 		} else {
@@ -2990,169 +2955,18 @@ func (bc *BidiConverter) ConvertPBToModel(pb, modelPtr interface{}) error {
 	} else if len(cache.fastEntries) > 0 {
 		for i := range cache.fastEntries {
 			entry := &cache.fastEntries[i]
-			srcField := pbVal.FieldByIndex(entry.srcIndex)
-			dstField := modelVal.FieldByIndex(entry.dstIndex)
+			srcField := srcVal.FieldByIndex(entry.srcIndex)
+			dstField := dstVal.FieldByIndex(entry.dstIndex)
 			if !srcField.IsValid() || !dstField.IsValid() || !dstField.CanSet() {
 				continue
 			}
-			if err := convertFastEntryByReflect(srcField, dstField, entry); err != nil {
+			if err := convertFieldByKind(srcField, dstField, entry); err != nil {
 				return NewConversionError("字段 %s 转换失败: %v", entry.srcName, err)
 			}
 		}
 	}
 
-	return bc.applySlowEntries(cache, pbVal, modelVal)
-}
-
-// ConvertModelToPB 将 Model 转换为 PB 消息（核心热路径）
-// 与 ConvertPBToModel 完全对称，但方向为 Model → PB
-// 使用 bc.modelToPBCache（而非 bc.pbToModelCache）
-// 执行同样的三层加速策略，详见 ConvertPBToModel 注释
-func (bc *BidiConverter) ConvertModelToPB(model, pbPtr interface{}) error {
-	if model == nil || pbPtr == nil {
-		return nil
-	}
-
-	modelVal := reflect.ValueOf(model)
-	pbVal := reflect.ValueOf(pbPtr)
-
-	if pbVal.Kind() != reflect.Ptr || pbVal.IsNil() {
-		return ErrMustBePointer
-	}
-
-	pbVal = pbVal.Elem()
-
-	if modelVal.Kind() == reflect.Ptr {
-		if modelVal.IsNil() {
-			return nil
-		}
-		modelVal = modelVal.Elem()
-	}
-
-	cache := bc.modelToPBFieldCache()
-
-	// 如果 modelVal 不可寻址（值类型传入 interface{}），尝试通过 interface{} 内部布局获取基地址
-	if !modelVal.CanAddr() && modelVal.Kind() == reflect.Struct && modelVal.Type() == cache.srcType {
-		if modelVal.Type().Size() > uintptr(unsafe.Sizeof(uintptr(0))) {
-			if srcBase := ifaceDataPtr(model); srcBase != nil {
-				dstBase := unsafe.Pointer(pbVal.UnsafeAddr())
-				if err := bc.applyFastPath(cache, srcBase, dstBase, modelVal, pbVal); err != nil {
-					return err
-				}
-				return bc.applySlowEntries(cache, modelVal, pbVal)
-			}
-		}
-	}
-
-	canFastPath := modelVal.CanAddr() && pbVal.CanAddr()
-
-	if canFastPath && cache.mergedCopyFunc != nil && !cache.hasTransformers {
-		srcBase := unsafe.Pointer(modelVal.UnsafeAddr())
-		dstBase := unsafe.Pointer(pbVal.UnsafeAddr())
-		cache.mergedCopyFunc(srcBase, dstBase)
-
-		if len(cache.slowEntries) == 0 {
-			return nil
-		}
-	} else if canFastPath && len(cache.fastEntries) > 0 {
-		srcBase := unsafe.Pointer(modelVal.UnsafeAddr())
-		dstBase := unsafe.Pointer(pbVal.UnsafeAddr())
-		if cache.mergedCopyFunc != nil {
-			cache.mergedCopyFunc(srcBase, dstBase)
-		} else {
-			for i := range cache.fastEntries {
-				cache.fastEntries[i].copyFunc(srcBase, dstBase)
-			}
-		}
-	} else if len(cache.fastEntries) > 0 {
-		for i := range cache.fastEntries {
-			entry := &cache.fastEntries[i]
-			srcField := modelVal.FieldByIndex(entry.srcIndex)
-			dstField := pbVal.FieldByIndex(entry.dstIndex)
-			if !srcField.IsValid() || !dstField.IsValid() || !dstField.CanSet() {
-				continue
-			}
-			if err := convertFastEntryByReflect(srcField, dstField, entry); err != nil {
-				return NewConversionError("字段 %s 转换失败: %v", entry.srcName, err)
-			}
-		}
-	}
-
-	return bc.applySlowEntries(cache, modelVal, pbVal)
-}
-
-// convertFastEntryByReflect 当值不可寻址时，使用 reflect 回退路径执行快速条目转换
-// 处理的字段种类与 convertFieldByKind 保持一致，避免源对象按值传入时跳过 fastEntry 字段
-func convertFastEntryByReflect(srcField, dstField reflect.Value, entry *fieldMappingEntry) error {
-	if !srcField.CanInterface() || !dstField.CanSet() {
-		return nil
-	}
-	kind := entry.kind
-	switch kind {
-	case fieldSameType, fieldAssignable:
-		if srcField.Type().AssignableTo(dstField.Type()) {
-			dstField.Set(srcField)
-		} else {
-			dstField.Set(srcField.Convert(dstField.Type()))
-		}
-	case fieldInteger, fieldConvertible:
-		dstField.Set(srcField.Convert(dstField.Type()))
-	case fieldTSToTime:
-		if srcField.Kind() == reflect.Ptr && srcField.IsNil() {
-			dstField.Set(reflect.Zero(dstField.Type()))
-			return nil
-		}
-		if ts, ok := srcField.Interface().(*timestamppb.Timestamp); ok {
-			dstField.Set(reflect.ValueOf(ts.AsTime()))
-		}
-	case fieldTimeToTS:
-		t, ok := srcField.Interface().(time.Time)
-		if !ok || t.IsZero() {
-			dstField.Set(reflect.Zero(dstField.Type()))
-			return nil
-		}
-		dstField.Set(reflect.ValueOf(timestamppb.New(t)))
-	case fieldTSToTimePtr:
-		if srcField.Kind() == reflect.Ptr && srcField.IsNil() {
-			dstField.Set(reflect.Zero(dstField.Type()))
-			return nil
-		}
-		if ts, ok := srcField.Interface().(*timestamppb.Timestamp); ok {
-			t := ts.AsTime()
-			dstField.Set(reflect.ValueOf(&t))
-		}
-	case fieldTimePtrToTS:
-		tPtr, ok := srcField.Interface().(*time.Time)
-		if !ok || tPtr == nil || tPtr.IsZero() {
-			dstField.Set(reflect.Zero(dstField.Type()))
-			return nil
-		}
-		dstField.Set(reflect.ValueOf(timestamppb.New(*tPtr)))
-	case fieldWrapper:
-		_, err := tryConvertWrapper(srcField, dstField)
-		if err != nil {
-			return err
-		}
-	case fieldSlice:
-		return convertSlice(srcField, dstField)
-	case fieldMap:
-		return convertMap(srcField, dstField)
-	case fieldMapStruct:
-		return convertMapStruct(srcField, dstField)
-	case fieldToPtr:
-		convertToPtr(srcField, dstField)
-	case fieldFromPtr:
-		convertFromPtr(srcField, dstField)
-	case fieldStruct:
-		return convertStruct(srcField, dstField)
-	case fieldStructPtr:
-		return convertStructPtr(srcField, dstField)
-	case fieldDataWrapper:
-		return convertDataWrapper(srcField, dstField)
-	case fieldStringFallback:
-		dstField.SetString(srcField.String())
-	}
-	return nil
+	return bc.applySlowEntries(cache, srcVal, dstVal)
 }
 
 // convertFieldByKind 使用 reflect 回退路径转换字段（慢速路径）
@@ -3392,6 +3206,12 @@ func convertMap(srcField, dstField reflect.Value) error {
 // structPtrType *structpb.Struct 的反射类型缓存，避免重复反射
 var structPtrType = reflect.TypeOf((*structpb.Struct)(nil))
 
+// 常见 map 类型的反射缓存，用于 ConvertibleTo 快路径判断
+var (
+	mapStringSliceType = reflect.TypeOf(map[string][]string(nil))
+	mapStringAnyType   = reflect.TypeOf(map[string]interface{}(nil))
+)
+
 // IsStructPtrType 判断是否为 *structpb.Struct 类型
 func IsStructPtrType(t reflect.Type) bool {
 	return t == structPtrType
@@ -3416,17 +3236,48 @@ func isMapStructPair(srcType, dstType reflect.Type) bool {
 //   - src 为 Map、dst 为 *structpb.Struct → map → struct
 //   - src 为 *structpb.Struct、dst 为 Map → struct → map
 func convertMapStruct(srcField, dstField reflect.Value) error {
-	// map[string]any → *structpb.Struct
+	// map → *structpb.Struct
 	if srcField.Kind() == reflect.Map && dstField.Type() == structPtrType {
 		if srcField.IsNil() {
 			dstField.Set(reflect.Zero(dstField.Type()))
 			return nil
 		}
-		// 遍历源 map 构造 map[string]interface{}，再交给 structpb.NewStruct
+
+		// 快路径 1：map[string][]string（含 CompressedTextMap 等命名类型）
+		// 直接构建 structpb.Struct，跳过 map[string]interface{} + []interface{} 中间层 + structpb.NewStruct 类型探测
+		if srcField.Type().ConvertibleTo(mapStringSliceType) {
+			m := srcField.Convert(mapStringSliceType).Interface().(map[string][]string)
+			st := buildStructFromMapStringSlice(m)
+			dstField.Set(reflect.ValueOf(st))
+			return nil
+		}
+
+		// 快路径 2：map[string]interface{} — 先直接试 structpb.NewStruct（零归一化开销）
+		// 失败时（值含 []string 等不兼容类型）才走 normalizeValue 逐项修复
+		if srcField.Type().ConvertibleTo(mapStringAnyType) {
+			m := srcField.Convert(mapStringAnyType).Interface().(map[string]interface{})
+			st, err := structpb.NewStruct(m)
+			if err == nil {
+				dstField.Set(reflect.ValueOf(st))
+				return nil
+			}
+			srcMap := make(map[string]interface{}, len(m))
+			for k, v := range m {
+				srcMap[k] = normalizeValue(v)
+			}
+			st, err = structpb.NewStruct(srcMap)
+			if err != nil {
+				return NewConversionError("map→struct 转换失败: %v", err)
+			}
+			dstField.Set(reflect.ValueOf(st))
+			return nil
+		}
+
+		// 慢路径：任意 map 类型，逐元素 reflect
 		srcMap := make(map[string]interface{}, srcField.Len())
 		iter := srcField.MapRange()
 		for iter.Next() {
-			srcMap[iter.Key().String()] = iter.Value().Interface()
+			srcMap[iter.Key().String()] = normalizeValue(iter.Value().Interface())
 		}
 		st, err := structpb.NewStruct(srcMap)
 		if err != nil {
@@ -3449,6 +3300,259 @@ func convertMapStruct(srcField, dstField reflect.Value) error {
 	}
 
 	return nil
+}
+
+// buildStructFromMapStringSlice 直接从 map[string][]string 构建 *structpb.Struct
+// 跳过 structpb.NewStruct 的 map[string]interface{} 中间层和类型探测
+//
+// 核心优化：批量预分配。原实现每个 Value/StringValue/ListValue 均单独 new，
+// 对于 N 键 M 值产生约 4N+2M+2 次分配；本实现将同类对象合并到连续数组中，
+// 通过 &array[i] 取地址复用，分配数降至常数级（~8 次），降幅约 85-90%
+//
+// 安全性：make([]T,n) 的底屽数组在堆上，&array[i] 存入 map 后由 GC 保持引用存活，
+// 与 structpb.NewStringValue 内部 &Value{...} 语义完全等价
+func buildStructFromMapStringSlice(m map[string][]string) *structpb.Struct {
+	n := len(m)
+	if n == 0 {
+		return &structpb.Struct{Fields: map[string]*structpb.Value{}}
+	}
+
+	// 统计字符串值总数，用于预分配字符串相关数组
+	totalStrings := 0
+	for _, arr := range m {
+		totalStrings += len(arr)
+	}
+
+	// 批量预分配：同类对象放入连续数组，消除逐元素 new 的堆分配
+	// list Values 与 string Values 合并到同一 allValues 数组的不同区间，减少 1 次分配
+	allValues := make([]structpb.Value, n+totalStrings)                // [0,n)=ListValue Value, [n,n+M)=StringValue Value
+	listWrappers := make([]structpb.Value_ListValue, n)                // ListValue oneof wrapper
+	stringWrappers := make([]structpb.Value_StringValue, totalStrings) // StringValue oneof wrapper
+	listInnerObjs := make([]structpb.ListValue, n)                     // ListValue 内部对象
+	valuePtrBacking := make([]*structpb.Value, totalStrings)           // 各 key 的 []*Value 共享同一 backing array
+
+	fields := make(map[string]*structpb.Value, n)
+
+	listIdx, strIdx, ptrIdx := 0, 0, 0
+	for k, arr := range m {
+		cnt := len(arr)
+		// 填充本 key 对应的字符串 Value 指针（存放在 allValues 的 [n, n+M) 区间）
+		for i, s := range arr {
+			stringWrappers[strIdx].StringValue = s
+			allValues[n+strIdx].Kind = &stringWrappers[strIdx]
+			valuePtrBacking[ptrIdx+i] = &allValues[n+strIdx]
+			strIdx++
+		}
+		// 组装 ListValue 并挂到 fields（ListValue Value 存放在 allValues 的 [0, n) 区间）
+		listInnerObjs[listIdx].Values = valuePtrBacking[ptrIdx : ptrIdx+cnt]
+		listWrappers[listIdx].ListValue = &listInnerObjs[listIdx]
+		allValues[listIdx].Kind = &listWrappers[listIdx]
+		fields[k] = &allValues[listIdx]
+
+		ptrIdx += cnt
+		listIdx++
+	}
+
+	return &structpb.Struct{Fields: fields}
+}
+
+// buildStructFromMapAny 从 map[string]interface{} 构建 *structpb.Struct，使用批量预分配
+// 仅处理扁平 structpb 兼容类型（顶层与列表元素均为 string/bool/float64/nil），
+// 嵌套 map/[]interface{} of 复杂类型等场景返回 (nil, error) 触发调用方回退 structpb.NewStruct
+//
+// 分配数从 structpb.NewStruct 的 ~3N+2M 降至常数级（~8 次），降幅约 70-85%
+func buildStructFromMapAny(m map[string]interface{}) (*structpb.Struct, error) {
+	n := len(m)
+	if n == 0 {
+		return &structpb.Struct{Fields: map[string]*structpb.Value{}}, nil
+	}
+
+	// 第一遍：按类型计数，同时检测是否全部为可快速处理的扁平类型
+	var strCnt, boolCnt, numCnt, nullCnt, listCnt, listElemCnt int
+	fast := true
+	for _, v := range m {
+		switch val := v.(type) {
+		case string:
+			strCnt++
+		case bool:
+			boolCnt++
+		case float64:
+			numCnt++
+		case nil:
+			nullCnt++
+		case []interface{}:
+			listCnt++
+			listElemCnt += len(val)
+			for _, elem := range val {
+				switch elem.(type) {
+				case string:
+					strCnt++
+				case bool:
+					boolCnt++
+				case float64:
+					numCnt++
+				case nil:
+					nullCnt++
+				default:
+					fast = false
+				}
+			}
+		default:
+			fast = false
+		}
+	}
+	if !fast {
+		return nil, errMapAnyNotFlat
+	}
+
+	// 预分配各类 wrapper 与 Value 数组，同类对象连续存储
+	// scalar Values 与 list Values 合并到同一 allValues 数组的不同区间，减少 1 次分配
+	totalScalars := strCnt + boolCnt + numCnt + nullCnt
+	allValues := make([]structpb.Value, totalScalars+listCnt) // [0,totalScalars)=标量 Value, [totalScalars,...)=ListValue Value
+	stringWrappers := make([]structpb.Value_StringValue, strCnt)
+	boolWrappers := make([]structpb.Value_BoolValue, boolCnt)
+	numberWrappers := make([]structpb.Value_NumberValue, numCnt)
+	nullWrappers := make([]structpb.Value_NullValue, nullCnt)
+	listWrappers := make([]structpb.Value_ListValue, listCnt)
+	listInnerObjs := make([]structpb.ListValue, listCnt)
+	valuePtrBacking := make([]*structpb.Value, listElemCnt)
+
+	fields := make(map[string]*structpb.Value, n)
+
+	// 第二遍：填充
+	strIdx, boolIdx, numIdx, nullIdx := 0, 0, 0, 0
+	listIdx, ptrIdx := 0, 0
+	scalarIdx := 0 // 标量 Values 的写入游标
+	for k, v := range m {
+		switch val := v.(type) {
+		case string:
+			stringWrappers[strIdx].StringValue = val
+			allValues[scalarIdx].Kind = &stringWrappers[strIdx]
+			fields[k] = &allValues[scalarIdx]
+			strIdx++
+			scalarIdx++
+		case bool:
+			boolWrappers[boolIdx].BoolValue = val
+			allValues[scalarIdx].Kind = &boolWrappers[boolIdx]
+			fields[k] = &allValues[scalarIdx]
+			boolIdx++
+			scalarIdx++
+		case float64:
+			numberWrappers[numIdx].NumberValue = val
+			allValues[scalarIdx].Kind = &numberWrappers[numIdx]
+			fields[k] = &allValues[scalarIdx]
+			numIdx++
+			scalarIdx++
+		case nil:
+			nullWrappers[nullIdx].NullValue = structpb.NullValue_NULL_VALUE
+			allValues[scalarIdx].Kind = &nullWrappers[nullIdx]
+			fields[k] = &allValues[scalarIdx]
+			nullIdx++
+			scalarIdx++
+		case []interface{}:
+			cnt := len(val)
+			// 填充列表元素的标量 Value 指针
+			for _, elem := range val {
+				switch e := elem.(type) {
+				case string:
+					stringWrappers[strIdx].StringValue = e
+					allValues[scalarIdx].Kind = &stringWrappers[strIdx]
+					strIdx++
+				case bool:
+					boolWrappers[boolIdx].BoolValue = e
+					allValues[scalarIdx].Kind = &boolWrappers[boolIdx]
+					boolIdx++
+				case float64:
+					numberWrappers[numIdx].NumberValue = e
+					allValues[scalarIdx].Kind = &numberWrappers[numIdx]
+					numIdx++
+				case nil:
+					nullWrappers[nullIdx].NullValue = structpb.NullValue_NULL_VALUE
+					allValues[scalarIdx].Kind = &nullWrappers[nullIdx]
+					nullIdx++
+				}
+				valuePtrBacking[ptrIdx] = &allValues[scalarIdx]
+				ptrIdx++
+				scalarIdx++
+			}
+			// 组装 ListValue（ListValue Value 存放在 allValues 的 [totalScalars, ...) 区间）
+			listInnerObjs[listIdx].Values = valuePtrBacking[ptrIdx-cnt : ptrIdx]
+			listWrappers[listIdx].ListValue = &listInnerObjs[listIdx]
+			allValues[totalScalars+listIdx].Kind = &listWrappers[listIdx]
+			fields[k] = &allValues[totalScalars+listIdx]
+			listIdx++
+		}
+	}
+
+	return &structpb.Struct{Fields: fields}, nil
+}
+
+// errMapAnyNotFlat 标记 map 值含非扁平类型（嵌套 map/[]interface{} of 复杂类型等），
+// 触发调用方回退到 normalizeValue + structpb.NewStruct 路径
+var errMapAnyNotFlat = NewConversionError("map 值含非扁平类型，需回退归一化路径")
+
+// normalizeValue 将 interface{} 归一化为 structpb.NewStruct/NewValue 兼容类型
+// 优先 type-switch（零 reflect 开销），仅罕见类型走 reflect 兜底
+// map[string][]string 分支使用单块连续 backing array 承载所有 []interface{} 切片，
+// 将 N 次 slice 分配合并为 1 次，分配数从 ~2N+1 降至 ~N+2
+func normalizeValue(v interface{}) interface{} {
+	switch val := v.(type) {
+	case nil:
+		return nil
+	case string, bool, int, int32, int64, float32, float64, []byte, []interface{}, map[string]interface{}:
+		return val // structpb 原生兼容，零转换
+	case []string:
+		out := make([]interface{}, len(val))
+		for i, s := range val {
+			out[i] = s
+		}
+		return out
+	case map[string][]string:
+		// 单遍历 + 共享 backing array：用 append 累积所有字符串值到同一底层数组，
+		// 各 key 对应的切片取 backing 的不同区间，减少 N-1 次 []interface{} 分配
+		// 初始容量按每键约 2 个值估算，多数场景避免 append 扩容拷贝
+		backing := make([]interface{}, 0, len(val)*2)
+		out := make(map[string]interface{}, len(val))
+		for k, arr := range val {
+			start := len(backing)
+			for _, s := range arr {
+				backing = append(backing, s)
+			}
+			out[k] = backing[start:]
+		}
+		return out
+	default:
+		// reflect 兜底：处理 []int / []float64 / map[string]int 等罕见类型
+		rv := reflect.ValueOf(v)
+		if !rv.IsValid() {
+			return nil
+		}
+		return normalizeValueReflect(rv)
+	}
+}
+
+// normalizeValueReflect reflect 兜底路径，仅被 normalizeValue 的 default 分支调用
+func normalizeValueReflect(v reflect.Value) interface{} {
+	switch v.Kind() {
+	case reflect.Slice, reflect.Array:
+		if v.Type().Elem().Kind() == reflect.Uint8 {
+			return v.Bytes()
+		}
+		out := make([]interface{}, v.Len())
+		for i := 0; i < v.Len(); i++ {
+			out[i] = normalizeValueReflect(v.Index(i))
+		}
+		return out
+	case reflect.Map:
+		out := make(map[string]interface{}, v.Len())
+		iter := v.MapRange()
+		for iter.Next() {
+			out[iter.Key().String()] = normalizeValueReflect(iter.Value())
+		}
+		return out
+	default:
+		return v.Interface()
+	}
 }
 
 // convertToPtr 将值类型转换为指针类型（reflect 慢路径）
@@ -3489,6 +3593,73 @@ func convertFromPtr(srcField, dstField reflect.Value) {
 	}
 }
 
+// applyStructFieldCacheReflect 在 reflect.Value 上应用 structFieldCache 的 fast+slow 转换
+// 这是 convertStruct/convertStructWithCache/convertStructPtr 的共用逻辑
+// CanAddr 时走 unsafe 快速路径（mergedFn 或 fastEntries copyFunc），否则全走 reflect
+func applyStructFieldCacheReflect(srcVal, dstVal reflect.Value, sc *structFieldCache) {
+	if srcVal.CanAddr() && dstVal.CanAddr() {
+		srcBase := unsafe.Pointer(srcVal.UnsafeAddr())
+		dstBase := unsafe.Pointer(dstVal.UnsafeAddr())
+		if sc.mergedFn != nil {
+			sc.mergedFn(srcBase, dstBase)
+		} else {
+			for i := range sc.fastEntries {
+				sc.fastEntries[i].copyFunc(srcBase, dstBase)
+			}
+		}
+		for i := range sc.slowEntries {
+			entry := &sc.slowEntries[i]
+			s := srcVal.FieldByIndex(entry.srcIndex)
+			d := dstVal.FieldByIndex(entry.dstIndex)
+			if !s.IsValid() || !d.IsValid() || !d.CanSet() {
+				continue
+			}
+			convertStructFieldSlow(s, d, entry)
+		}
+		return
+	}
+	// 非 CanAddr 路径：fastEntries + slowEntries 都走 reflect convertStructFieldSlow
+	for i := range sc.fastEntries {
+		entry := &sc.fastEntries[i]
+		s := srcVal.FieldByIndex(entry.srcIndex)
+		d := dstVal.FieldByIndex(entry.dstIndex)
+		if !s.IsValid() || !d.IsValid() || !d.CanSet() {
+			continue
+		}
+		convertStructFieldSlow(s, d, entry)
+	}
+	for i := range sc.slowEntries {
+		entry := &sc.slowEntries[i]
+		s := srcVal.FieldByIndex(entry.srcIndex)
+		d := dstVal.FieldByIndex(entry.dstIndex)
+		if !s.IsValid() || !d.IsValid() || !d.CanSet() {
+			continue
+		}
+		convertStructFieldSlow(s, d, entry)
+	}
+}
+
+// applyStructSlowEntriesUnsafe 在 unsafe 指针基址上应用 structFieldCache 的 slowEntries
+// 这是 make*CopyFunc 系列函数中处理嵌套结构体慢速字段的共用逻辑：
+// 利用 sc.srcType/sc.dstType 构造 reflect.Value，再走 FieldByIndex + convertStructFieldSlow
+// 调用方需保证 srcBase/dstBase 已指向与 sc.srcType/sc.dstType 对应的结构体实例
+func applyStructSlowEntriesUnsafe(srcBase, dstBase unsafe.Pointer, sc *structFieldCache) {
+	if len(sc.slowEntries) == 0 {
+		return
+	}
+	srcVal := reflect.NewAt(sc.srcType, srcBase).Elem()
+	dstVal := reflect.NewAt(sc.dstType, dstBase).Elem()
+	for i := range sc.slowEntries {
+		entry := &sc.slowEntries[i]
+		s := srcVal.FieldByIndex(entry.srcIndex)
+		d := dstVal.FieldByIndex(entry.dstIndex)
+		if !s.IsValid() || !d.IsValid() {
+			continue
+		}
+		convertStructFieldSlow(s, d, entry)
+	}
+}
+
 // convertStruct 转换结构体（值类型）
 // 优先级：
 //  1. 查找 globalStructFieldCache 中的缓存 → 用 fast/slow 分层转换
@@ -3503,24 +3674,7 @@ func convertStruct(srcField, dstField reflect.Value) error {
 	if cached {
 		sc := subCache.(*structFieldCache)
 		if srcField.CanAddr() && dstField.CanAddr() {
-			srcBase := unsafe.Pointer(srcField.UnsafeAddr())
-			dstBase := unsafe.Pointer(dstField.UnsafeAddr())
-			if sc.mergedFn != nil {
-				sc.mergedFn(srcBase, dstBase)
-			} else {
-				for i := range sc.fastEntries {
-					sc.fastEntries[i].copyFunc(srcBase, dstBase)
-				}
-			}
-			for i := range sc.slowEntries {
-				entry := &sc.slowEntries[i]
-				s := srcField.FieldByIndex(entry.srcIndex)
-				d := dstField.FieldByIndex(entry.dstIndex)
-				if !s.IsValid() || !d.IsValid() || !d.CanSet() {
-					continue
-				}
-				convertStructFieldSlow(s, d, entry)
-			}
+			applyStructFieldCacheReflect(srcField, dstField, sc)
 			return nil
 		}
 	}
@@ -3548,48 +3702,9 @@ func convertStruct(srcField, dstField reflect.Value) error {
 
 // convertStructWithCache 使用缓存的字段映射转换结构体值
 // 与 convertStruct 类似但直接使用预构建的 structFieldCache
-// 支持 CanAddr 快速路径（mergedFn/unsafe）和不可寻址的 reflect 回退
+// 委托给 applyStructFieldCacheReflect 处理 CanAddr 快速路径和 reflect 回退
 func convertStructWithCache(srcField, dstField reflect.Value, sc *structFieldCache) error {
-	if srcField.CanAddr() && dstField.CanAddr() {
-		srcBase := unsafe.Pointer(srcField.UnsafeAddr())
-		dstBase := unsafe.Pointer(dstField.UnsafeAddr())
-		if sc.mergedFn != nil {
-			sc.mergedFn(srcBase, dstBase)
-		} else {
-			for i := range sc.fastEntries {
-				sc.fastEntries[i].copyFunc(srcBase, dstBase)
-			}
-		}
-		for i := range sc.slowEntries {
-			entry := &sc.slowEntries[i]
-			s := srcField.FieldByIndex(entry.srcIndex)
-			d := dstField.FieldByIndex(entry.dstIndex)
-			if !s.IsValid() || !d.IsValid() || !d.CanSet() {
-				continue
-			}
-			convertStructFieldSlow(s, d, entry)
-		}
-		return nil
-	}
-
-	for i := range sc.fastEntries {
-		entry := &sc.fastEntries[i]
-		s := srcField.FieldByIndex(entry.srcIndex)
-		d := dstField.FieldByIndex(entry.dstIndex)
-		if !s.IsValid() || !d.IsValid() || !d.CanSet() {
-			continue
-		}
-		convertStructFieldSlow(s, d, entry)
-	}
-	for i := range sc.slowEntries {
-		entry := &sc.slowEntries[i]
-		s := srcField.FieldByIndex(entry.srcIndex)
-		d := dstField.FieldByIndex(entry.dstIndex)
-		if !s.IsValid() || !d.IsValid() || !d.CanSet() {
-			continue
-		}
-		convertStructFieldSlow(s, d, entry)
-	}
+	applyStructFieldCacheReflect(srcField, dstField, sc)
 	return nil
 }
 
@@ -3610,112 +3725,25 @@ func convertStructPtr(srcField, dstField reflect.Value) error {
 	dstElemType := dstField.Type().Elem()
 
 	subCache, cached := globalStructFieldCache.Load(structFieldTypePair{srcElemType, dstElemType})
-	if cached {
-		sc := subCache.(*structFieldCache)
-		srcElem := srcField.Elem()
-		dstPtr := reflect.New(dstElemType)
-		dstElem := dstPtr.Elem()
-		if srcElem.CanAddr() && dstElem.CanAddr() {
-			srcBase := unsafe.Pointer(srcElem.UnsafeAddr())
-			dstBase := unsafe.Pointer(dstElem.UnsafeAddr())
-			if sc.mergedFn != nil {
-				sc.mergedFn(srcBase, dstBase)
-			} else {
-				for i := range sc.fastEntries {
-					sc.fastEntries[i].copyFunc(srcBase, dstBase)
-				}
+	if !cached {
+		// 未缓存时先尝试注册转换器，再构建缓存
+		if converter, ok := findConverter(srcElemType, dstElemType); ok && converter != nil {
+			dstPtr := reflect.New(dstElemType)
+			if err := converter.ConvertModelToPB(srcField.Interface(), dstPtr.Interface()); err != nil {
+				return err
 			}
-			for i := range sc.slowEntries {
-				entry := &sc.slowEntries[i]
-				s := srcElem.FieldByIndex(entry.srcIndex)
-				d := dstElem.FieldByIndex(entry.dstIndex)
-				if !s.IsValid() || !d.IsValid() || !d.CanSet() {
-					continue
-				}
-				convertStructFieldSlow(s, d, entry)
-			}
-		} else {
-			for i := range sc.fastEntries {
-				entry := &sc.fastEntries[i]
-				s := srcElem.FieldByIndex(entry.srcIndex)
-				d := dstElem.FieldByIndex(entry.dstIndex)
-				if !s.IsValid() || !d.IsValid() || !d.CanSet() {
-					continue
-				}
-				convertStructFieldSlow(s, d, entry)
-			}
-			for i := range sc.slowEntries {
-				entry := &sc.slowEntries[i]
-				s := srcElem.FieldByIndex(entry.srcIndex)
-				d := dstElem.FieldByIndex(entry.dstIndex)
-				if !s.IsValid() || !d.IsValid() || !d.CanSet() {
-					continue
-				}
-				convertStructFieldSlow(s, d, entry)
-			}
+			dstField.Set(dstPtr)
+			return nil
 		}
-		dstField.Set(dstPtr)
-		return nil
+		subCache = buildStructFieldCache(srcElemType, dstElemType, true)
+		globalStructFieldCache.Store(structFieldTypePair{srcElemType, dstElemType}, subCache)
 	}
-
-	converter, ok := findConverter(srcElemType, dstElemType)
-	if ok && converter != nil {
-		dstPtr := reflect.New(dstElemType)
-		if err := converter.ConvertModelToPB(srcField.Interface(), dstPtr.Interface()); err != nil {
-			return err
-		}
-		dstField.Set(dstPtr)
-		return nil
-	}
-
-	subCache = buildStructFieldCache(srcElemType, dstElemType, true)
-	globalStructFieldCache.Store(structFieldTypePair{srcElemType, dstElemType}, subCache)
 	sc := subCache.(*structFieldCache)
 
 	srcElem := srcField.Elem()
 	dstPtr := reflect.New(dstElemType)
 	dstElem := dstPtr.Elem()
-
-	if srcElem.CanAddr() && dstElem.CanAddr() {
-		srcBase := unsafe.Pointer(srcElem.UnsafeAddr())
-		dstBase := unsafe.Pointer(dstElem.UnsafeAddr())
-		if sc.mergedFn != nil {
-			sc.mergedFn(srcBase, dstBase)
-		} else {
-			for i := range sc.fastEntries {
-				sc.fastEntries[i].copyFunc(srcBase, dstBase)
-			}
-		}
-		for i := range sc.slowEntries {
-			entry := &sc.slowEntries[i]
-			s := srcElem.FieldByIndex(entry.srcIndex)
-			d := dstElem.FieldByIndex(entry.dstIndex)
-			if !s.IsValid() || !d.IsValid() || !d.CanSet() {
-				continue
-			}
-			convertStructFieldSlow(s, d, entry)
-		}
-	} else {
-		for i := range sc.fastEntries {
-			entry := &sc.fastEntries[i]
-			s := srcElem.FieldByIndex(entry.srcIndex)
-			d := dstElem.FieldByIndex(entry.dstIndex)
-			if !s.IsValid() || !d.IsValid() || !d.CanSet() {
-				continue
-			}
-			convertStructFieldSlow(s, d, entry)
-		}
-		for i := range sc.slowEntries {
-			entry := &sc.slowEntries[i]
-			s := srcElem.FieldByIndex(entry.srcIndex)
-			d := dstElem.FieldByIndex(entry.dstIndex)
-			if !s.IsValid() || !d.IsValid() || !d.CanSet() {
-				continue
-			}
-			convertStructFieldSlow(s, d, entry)
-		}
-	}
-
+	applyStructFieldCacheReflect(srcElem, dstElem, sc)
 	dstField.Set(dstPtr)
 	return nil
 }

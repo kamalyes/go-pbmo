@@ -335,3 +335,123 @@ type TestMapStructPB struct {
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
+
+// === converter 慢路径触发模型（用于覆盖 convertStruct/convertStructPtr/convertSlice/convertDataWrapper 等）===
+
+// TestMixedInnerPB 混合字段嵌套 PB：Name(fast) + Params(slow in PB→Model)
+// 在 PB→Model 方向，Params 为 slow（makeMapStructCopyFunc 对 *structpb.Struct→map 返回 nil），
+// 从而触发外层 makeStructPtrCopyFunc 闭包中的 applyStructSlowEntriesUnsafe
+type TestMixedInnerPB struct {
+	Name   string
+	Params *structpb.Struct
+}
+
+// TestMixedInnerModel 与 TestMixedInnerPB 对应的 Model
+type TestMixedInnerModel struct {
+	Name   string
+	Params map[string]interface{}
+}
+
+// TestOuterMixedPB 外层包含混合嵌套指针（触发 applyStructSlowEntriesUnsafe）
+type TestOuterMixedPB struct {
+	Name  string
+	Inner *TestMixedInnerPB
+}
+
+// TestOuterMixedModel 与 TestOuterMixedPB 对应的 Model
+type TestOuterMixedModel struct {
+	Name  string
+	Inner *TestMixedInnerModel
+}
+
+// TestAllSlowInnerPB 全 slow 字段嵌套 PB（仅含 *structpb.Struct 字段）
+// 用于触发 convertStructPtr：makeStructPtrCopyFunc 因无 fast 字段返回 nil，该字段成为 slowEntry
+type TestAllSlowInnerPB struct {
+	Params *structpb.Struct
+}
+
+// TestAllSlowInnerModel 与 TestAllSlowInnerPB 对应的 Model
+type TestAllSlowInnerModel struct {
+	Params map[string]interface{}
+}
+
+// TestOuterAllSlowPB 外层包含全 slow 嵌套指针（触发 convertStructPtr）
+type TestOuterAllSlowPB struct {
+	Name  string
+	Inner *TestAllSlowInnerPB
+}
+
+// TestOuterAllSlowModel 与 TestOuterAllSlowPB 对应的 Model
+type TestOuterAllSlowModel struct {
+	Name  string
+	Inner *TestAllSlowInnerModel
+}
+
+// TestOuterValueStructPB 外层包含值类型嵌套结构体（触发 convertStruct，非指针）
+type TestOuterValueStructPB struct {
+	Name  string
+	Inner TestAllSlowInnerPB
+}
+
+// TestOuterValueStructModel 与 TestOuterValueStructPB 对应的 Model
+type TestOuterValueStructModel struct {
+	Name  string
+	Inner TestAllSlowInnerModel
+}
+
+// TestSliceStructPB 切片元素为不同结构体指针（触发 convertSlice/convertElement）
+// 元素类型 *TestAllSlowInnerPB → *TestAllSlowInnerModel 不 ConvertibleTo，
+// 且元素结构体全 slow，使 makeSliceCopyFunc 返回 nil
+type TestSliceStructPB struct {
+	Name  string
+	Items []*TestAllSlowInnerPB
+}
+
+// TestSliceStructModel 与 TestSliceStructPB 对应的 Model
+type TestSliceStructModel struct {
+	Name  string
+	Items []*TestAllSlowInnerModel
+}
+
+// TestSliceValueStructPB 切片元素为值结构体（覆盖 convertSlice 元素为值类型的分支）
+type TestSliceValueStructPB struct {
+	Name  string
+	Items []TestAllSlowInnerPB
+}
+
+// TestSliceValueStructModel 与 TestSliceValueStructPB 对应的 Model
+type TestSliceValueStructModel struct {
+	Name  string
+	Items []TestAllSlowInnerModel
+}
+
+// IntWrapper DataWrapper[T] 模式：struct{Data T}
+// 用于触发 convertDataWrapper 慢路径（makeDataWrapperCopyFunc 对非指针 inner 返回 nil）
+type IntWrapper struct {
+	Data int
+}
+
+// TestDataWrapperPB DataWrapper 测试 PB（Count 字段为 IntWrapper 值类型）
+type TestDataWrapperPB struct {
+	Name  string
+	Count IntWrapper
+}
+
+// TestDataWrapperModel 与 TestDataWrapperPB 对应的 Model（Count 为 int 值类型）
+type TestDataWrapperModel struct {
+	Name  string
+	Count int
+}
+
+// TestMapStringSlicePB 测试 map[string][]string ↔ *structpb.Struct 快路径
+// 触发 buildStructFromMapStringSlice
+type TestMapStringSlicePB struct {
+	Name   string
+	Params *structpb.Struct
+}
+
+// TestMapStringSliceModel 与 TestMapStringSlicePB 对应的 Model（Params 为 map[string][]string）
+type TestMapStringSliceModel struct {
+	Name   string
+	Params map[string][]string
+}

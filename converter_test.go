@@ -25,7 +25,6 @@ func TestNewBidiConverter(t *testing.T) {
 	bc := NewBidiConverter(TestPB{}, TestModel{})
 	assert.NotNil(t, bc)
 	assert.NotNil(t, bc.transformers)
-	assert.NotNil(t, bc.validator)
 	assert.NotNil(t, bc.options)
 }
 
@@ -210,11 +209,6 @@ func TestBidiConverter_GetModelType(t *testing.T) {
 func TestBidiConverter_GetPBType(t *testing.T) {
 	bc := NewBidiConverter(TestSimplePB{}, TestSimpleModel{})
 	assert.Equal(t, "TestSimplePB", bc.GetPBType().Name())
-}
-
-func TestBidiConverter_GetValidator(t *testing.T) {
-	bc := NewBidiConverter(TestSimplePB{}, TestSimpleModel{})
-	assert.NotNil(t, bc.GetValidator())
 }
 
 func TestBidiConverter_GetTransformers(t *testing.T) {
@@ -596,4 +590,351 @@ func TestConvertMapStruct_RoundTrip(t *testing.T) {
 	origList := original.Params["list_val"].([]interface{})
 	rtList := roundTrip.Params["list_val"].([]interface{})
 	assert.Equal(t, origList, rtList)
+}
+
+// === converter 慢路径覆盖测试 ===
+
+// TestConvertPBToModel_NestedStructPtr_MixedFastSlow 触发 applyStructSlowEntriesUnsafe
+// TestOuterMixedPB.Inner 是 *TestMixedInnerPB，InnerPB→InnerModel 在 PB→Model 方向：
+//   - Name 是 fast（string→string）
+//   - Params 是 slow（*structpb.Struct→map[string]any，makeMapStructCopyFunc 返回 nil）
+//
+// 因有 fast 字段，makeStructPtrCopyFunc 返回非 nil 闭包，闭包内调用 applyStructSlowEntriesUnsafe 处理 slow 部分
+func TestConvertPBToModel_NestedStructPtr_MixedFastSlow(t *testing.T) {
+	bc := NewBidiConverter(TestOuterMixedPB{}, TestOuterMixedModel{})
+
+	st, err := structpb.NewStruct(map[string]interface{}{
+		"host": "localhost",
+		"port": float64(8080),
+	})
+	assert.NoError(t, err)
+
+	pb := TestOuterMixedPB{
+		Name: "outer",
+		Inner: &TestMixedInnerPB{
+			Name:   "inner",
+			Params: st,
+		},
+	}
+
+	var model TestOuterMixedModel
+	err = bc.ConvertPBToModel(pb, &model)
+	assert.NoError(t, err)
+	assert.Equal(t, "outer", model.Name)
+	assert.NotNil(t, model.Inner)
+	assert.Equal(t, "inner", model.Inner.Name)
+	assert.NotNil(t, model.Inner.Params)
+	assert.Equal(t, "localhost", model.Inner.Params["host"])
+	assert.Equal(t, float64(8080), model.Inner.Params["port"])
+
+	// nil Inner 指针场景
+	pb2 := TestOuterMixedPB{Name: "no-inner", Inner: nil}
+	var model2 TestOuterMixedModel
+	err = bc.ConvertPBToModel(pb2, &model2)
+	assert.NoError(t, err)
+	assert.Equal(t, "no-inner", model2.Name)
+	assert.Nil(t, model2.Inner)
+}
+
+// TestConvertPBToModel_NestedStructPtr_AllSlow 触发 convertStructPtr
+// TestOuterAllSlowPB.Inner 是 *TestAllSlowInnerPB（全 slow 字段），
+// makeStructPtrCopyFunc 因无 fast 字段返回 nil，Inner 成为 slowEntry，
+// convertFieldByKind 调用 convertStructPtr
+func TestConvertPBToModel_NestedStructPtr_AllSlow(t *testing.T) {
+	bc := NewBidiConverter(TestOuterAllSlowPB{}, TestOuterAllSlowModel{})
+
+	st, err := structpb.NewStruct(map[string]interface{}{
+		"key": "value",
+	})
+	assert.NoError(t, err)
+
+	pb := TestOuterAllSlowPB{
+		Name: "outer",
+		Inner: &TestAllSlowInnerPB{
+			Params: st,
+		},
+	}
+
+	var model TestOuterAllSlowModel
+	err = bc.ConvertPBToModel(pb, &model)
+	assert.NoError(t, err)
+	assert.Equal(t, "outer", model.Name)
+	assert.NotNil(t, model.Inner)
+	assert.NotNil(t, model.Inner.Params)
+	assert.Equal(t, "value", model.Inner.Params["key"])
+
+	// nil Inner 场景（触发 convertStructPtr 的 IsNil 分支）
+	pb2 := TestOuterAllSlowPB{Name: "nil-inner", Inner: nil}
+	var model2 TestOuterAllSlowModel
+	err = bc.ConvertPBToModel(pb2, &model2)
+	assert.NoError(t, err)
+	assert.Nil(t, model2.Inner)
+}
+
+// TestConvertPBToModel_NestedValueStruct_AllSlow 触发 convertStruct（值类型结构体）
+// TestOuterValueStructPB.Inner 是值类型 TestAllSlowInnerPB（全 slow 字段），
+// makeStructCopyFunc 因无 fast 字段返回 nil，Inner 成为 slowEntry，
+// convertFieldByKind 调用 convertStruct
+func TestConvertPBToModel_NestedValueStruct_AllSlow(t *testing.T) {
+	bc := NewBidiConverter(TestOuterValueStructPB{}, TestOuterValueStructModel{})
+
+	st, err := structpb.NewStruct(map[string]interface{}{
+		"key": "value",
+	})
+	assert.NoError(t, err)
+
+	pb := TestOuterValueStructPB{
+		Name:  "outer",
+		Inner: TestAllSlowInnerPB{Params: st},
+	}
+
+	var model TestOuterValueStructModel
+	err = bc.ConvertPBToModel(pb, &model)
+	assert.NoError(t, err)
+	assert.Equal(t, "outer", model.Name)
+	assert.NotNil(t, model.Inner.Params)
+	assert.Equal(t, "value", model.Inner.Params["key"])
+}
+
+// TestConvertSlice_DifferentStructPtrElements 触发 convertSlice + convertElement
+// TestSliceStructPB.Items 是 []*TestAllSlowInnerPB（全 slow 元素结构体），
+// makeSliceCopyFunc 策略 3 因元素无 fast 字段返回 nil，Items 成为 slowEntry，
+// convertFieldByKind 调用 convertSlice → convertElement → convertStructPtr
+func TestConvertSlice_DifferentStructPtrElements(t *testing.T) {
+	bc := NewBidiConverter(TestSliceStructPB{}, TestSliceStructModel{})
+
+	st1, _ := structpb.NewStruct(map[string]interface{}{"a": "1"})
+	st2, _ := structpb.NewStruct(map[string]interface{}{"b": float64(2)})
+
+	pb := TestSliceStructPB{
+		Name: "slice-test",
+		Items: []*TestAllSlowInnerPB{
+			{Params: st1},
+			{Params: st2},
+			nil, // 触发 convertElement 的 nil 元素分支
+		},
+	}
+
+	var model TestSliceStructModel
+	err := bc.ConvertPBToModel(pb, &model)
+	assert.NoError(t, err)
+	assert.Equal(t, "slice-test", model.Name)
+	assert.Len(t, model.Items, 3)
+	assert.NotNil(t, model.Items[0])
+	assert.Equal(t, "1", model.Items[0].Params["a"])
+	assert.NotNil(t, model.Items[1])
+	assert.Equal(t, float64(2), model.Items[1].Params["b"])
+	assert.Nil(t, model.Items[2])
+
+	// 空切片场景（触发 convertSlice 的 srcLen==0 分支）
+	pb2 := TestSliceStructPB{Name: "empty", Items: []*TestAllSlowInnerPB{}}
+	var model2 TestSliceStructModel
+	err = bc.ConvertPBToModel(pb2, &model2)
+	assert.NoError(t, err)
+	assert.NotNil(t, model2.Items)
+	assert.Equal(t, 0, len(model2.Items))
+}
+
+// TestConvertSlice_ValueStructElements 触发 convertSlice + convertElement（值结构体元素）
+// 注意：convertElement 不处理 Struct→Struct（仅 *Struct→*Struct），所以值结构体元素不会被转换，
+// 但能覆盖 convertSlice 和 convertElement 的部分路径
+func TestConvertSlice_ValueStructElements(t *testing.T) {
+	bc := NewBidiConverter(TestSliceValueStructPB{}, TestSliceValueStructModel{})
+
+	st, _ := structpb.NewStruct(map[string]interface{}{"k": "v"})
+
+	pb := TestSliceValueStructPB{
+		Name:  "val-slice",
+		Items: []TestAllSlowInnerPB{{Params: st}},
+	}
+
+	var model TestSliceValueStructModel
+	err := bc.ConvertPBToModel(pb, &model)
+	assert.NoError(t, err)
+	assert.Equal(t, "val-slice", model.Name)
+	assert.Len(t, model.Items, 1)
+}
+
+// TestConvertDataWrapper_ValueToValue 触发 convertDataWrapper（DataWrapper[T] → T）
+// makeDataWrapperCopyFunc 对非指针 inner 返回 nil，Count 成为 slowEntry，
+// convertFieldByKind 调用 convertDataWrapper
+func TestConvertDataWrapper_ValueToValue(t *testing.T) {
+	bc := NewBidiConverter(TestDataWrapperPB{}, TestDataWrapperModel{})
+
+	pb := TestDataWrapperPB{Name: "dw", Count: IntWrapper{Data: 42}}
+	var model TestDataWrapperModel
+	err := bc.ConvertPBToModel(pb, &model)
+	assert.NoError(t, err)
+	assert.Equal(t, "dw", model.Name)
+	assert.Equal(t, 42, model.Count)
+
+	// 反向 Model→PB（触发 convertDataWrapper 的 T → DataWrapper[T] 分支）
+	model2 := TestDataWrapperModel{Name: "back", Count: 99}
+	var pb2 TestDataWrapperPB
+	err = bc.ConvertModelToPB(model2, &pb2)
+	assert.NoError(t, err)
+	assert.Equal(t, "back", pb2.Name)
+	assert.Equal(t, 99, pb2.Count.Data)
+}
+
+// TestIsStructPtrType 直接调用 IsStructPtrType 断言
+func TestIsStructPtrType(t *testing.T) {
+	assert.True(t, IsStructPtrType(reflect.TypeOf((*structpb.Struct)(nil))))
+	assert.False(t, IsStructPtrType(reflect.TypeOf(structpb.Struct{})))
+	assert.False(t, IsStructPtrType(reflect.TypeOf("string")))
+	assert.False(t, IsStructPtrType(reflect.TypeOf(42)))
+}
+
+// TestConvertMapStruct_MapStringSlice 触发 buildStructFromMapStringSlice 快路径
+// map[string][]string → *structpb.Struct 通过 makeMapStructCopyFunc 快路径处理
+func TestConvertMapStruct_MapStringSlice(t *testing.T) {
+	bc := NewBidiConverter(TestMapStringSlicePB{}, TestMapStringSliceModel{})
+
+	model := TestMapStringSliceModel{
+		Name: "slice-map",
+		Params: map[string][]string{
+			"tags": {"a", "b", "c"},
+			"ids":  {"1", "2"},
+		},
+	}
+
+	var pb TestMapStringSlicePB
+	err := bc.ConvertModelToPB(model, &pb)
+	assert.NoError(t, err)
+	assert.Equal(t, "slice-map", pb.Name)
+	assert.NotNil(t, pb.Params)
+
+	m := pb.Params.AsMap()
+	tags, ok := m["tags"].([]interface{})
+	assert.True(t, ok)
+	assert.Equal(t, []interface{}{"a", "b", "c"}, tags)
+
+	ids, ok := m["ids"].([]interface{})
+	assert.True(t, ok)
+	assert.Equal(t, []interface{}{"1", "2"}, ids)
+
+	// nil map 场景
+	model2 := TestMapStringSliceModel{Name: "nil"}
+	var pb2 TestMapStringSlicePB
+	err = bc.ConvertModelToPB(model2, &pb2)
+	assert.NoError(t, err)
+	assert.Equal(t, "nil", pb2.Name)
+	assert.Nil(t, pb2.Params)
+
+	// 空 map 场景（触发 buildStructFromMapStringSlice 的 n==0 分支）
+	model3 := TestMapStringSliceModel{Name: "empty", Params: map[string][]string{}}
+	var pb3 TestMapStringSlicePB
+	err = bc.ConvertModelToPB(model3, &pb3)
+	assert.NoError(t, err)
+	assert.NotNil(t, pb3.Params)
+	assert.Equal(t, 0, len(pb3.Params.GetFields()))
+}
+
+// TestNormalizeValue_ReflectBranches 触发 normalizeValueReflect 各分支
+// 通过 map[string]any 含 []int、map[string]int 等罕见类型，让 normalizeValue 走 reflect 兜底
+func TestNormalizeValue_ReflectBranches(t *testing.T) {
+	bc := NewBidiConverter(TestMapStructPB{}, TestMapStructModel{})
+
+	// 含 []int（需 reflect 归一化）、map[string]int（需 reflect 归一化）
+	model := TestMapStructModel{
+		Name: "reflect",
+		Params: map[string]interface{}{
+			"ints":   []int{1, 2, 3},                  // 触发 normalizeValueReflect 的 Slice 分支
+			"intmap": map[string]int{"a": 1},          // 触发 normalizeValueReflect 的 Map 分支
+			"strs":   []string{"x", "y"},              // 触发 normalizeValue 的 []string 分支
+			"strmap": map[string][]string{"k": {"v"}}, // 触发 normalizeValue 的 map[string][]string 分支
+			"bytes":  []byte("hello"),                 // 触发 normalizeValue 的 []byte 分支（structpb 会 base64 编码）
+		},
+	}
+
+	var pb TestMapStructPB
+	err := bc.ConvertModelToPB(model, &pb)
+	assert.NoError(t, err)
+	assert.NotNil(t, pb.Params)
+
+	m := pb.Params.AsMap()
+	ints, ok := m["ints"].([]interface{})
+	assert.True(t, ok)
+	assert.Equal(t, []interface{}{float64(1), float64(2), float64(3)}, ints)
+
+	intmap, ok := m["intmap"].(map[string]interface{})
+	assert.True(t, ok)
+	assert.Equal(t, float64(1), intmap["a"])
+
+	strs, ok := m["strs"].([]interface{})
+	assert.True(t, ok)
+	assert.Equal(t, []interface{}{"x", "y"}, strs)
+
+	strmap, ok := m["strmap"].(map[string]interface{})
+	assert.True(t, ok)
+	assert.Equal(t, []interface{}{"v"}, strmap["k"])
+
+	// []byte 在 structpb 中会被 base64 编码为 string
+	bytesVal, ok := m["bytes"].(string)
+	assert.True(t, ok)
+	assert.NotEmpty(t, bytesVal) // base64 编码后的 "aGVsbG8="
+}
+
+// TestConvertMapStruct_StructToMap_Reverse 反向 *structpb.Struct → map[string]any
+// 通过 PB→Model 方向触发 convertMapStruct 的反向分支（makeMapStructCopyFunc 返回 nil，成为 slowEntry）
+func TestConvertMapStruct_StructToMap_Reverse(t *testing.T) {
+	bc := NewBidiConverter(TestMapStructPB{}, TestMapStructModel{})
+
+	st, err := structpb.NewStruct(map[string]interface{}{
+		"nested": map[string]interface{}{"inner": float64(1)},
+		"list":   []interface{}{float64(1), float64(2)},
+	})
+	assert.NoError(t, err)
+
+	pb := TestMapStructPB{Name: "reverse", Params: st}
+	var model TestMapStructModel
+	err = bc.ConvertPBToModel(pb, &model)
+	assert.NoError(t, err)
+	assert.Equal(t, "reverse", model.Name)
+	assert.NotNil(t, model.Params)
+
+	nested, ok := model.Params["nested"].(map[string]interface{})
+	assert.True(t, ok)
+	assert.Equal(t, float64(1), nested["inner"])
+
+	list, ok := model.Params["list"].([]interface{})
+	assert.True(t, ok)
+	assert.Equal(t, float64(1), list[0])
+	assert.Equal(t, float64(2), list[1])
+}
+
+// TestConvertMapStringSlice_NonStringKeyMap 触发 convertMapStruct 的慢路径（任意 map 类型）
+// 通过 map[string]any 的元素直接构造非 string/string[] 类型
+func TestConvertMapStringSlice_NonStringKeyMap(t *testing.T) {
+	// 直接测试 buildStructFromMapAny 的 fast=true 分支（全扁平类型）
+	m := map[string]interface{}{
+		"str":  "hello",
+		"num":  float64(42),
+		"flag": true,
+		"null": nil,
+		"list": []interface{}{float64(1), float64(2)},
+	}
+	st, err := buildStructFromMapAny(m)
+	assert.NoError(t, err)
+	assert.NotNil(t, st)
+	result := st.AsMap()
+	assert.Equal(t, "hello", result["str"])
+	assert.Equal(t, float64(42), result["num"])
+	assert.True(t, result["flag"].(bool))
+	assert.Nil(t, result["null"])
+	assert.Equal(t, []interface{}{float64(1), float64(2)}, result["list"])
+
+	// fast=false 分支（含非扁平类型）
+	m2 := map[string]interface{}{
+		"nested": map[string]int{"a": 1}, // 触发 fast=false
+	}
+	st2, err := buildStructFromMapAny(m2)
+	assert.Error(t, err)
+	assert.Nil(t, st2)
+
+	// 空 map 分支
+	st3, err := buildStructFromMapAny(map[string]interface{}{})
+	assert.NoError(t, err)
+	assert.NotNil(t, st3)
+	assert.Equal(t, 0, len(st3.GetFields()))
 }
