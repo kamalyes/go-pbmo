@@ -42,6 +42,13 @@ func (b *UpdatesBuilder) Set(key string, value interface{}) *UpdatesBuilder {
 	return b
 }
 
+// SetNull 将字段设置为 NULL（等价于 Set(key, nil)）
+// 用于将数据库字段清空的语义化写法，如 SetNull("callback_at") 替代 Set("callback_at", time.Time{})
+func (b *UpdatesBuilder) SetNull(key string) *UpdatesBuilder {
+	b.updates[key] = nil
+	return b
+}
+
 func (b *UpdatesBuilder) SetIf(condition bool, key string, value interface{}) *UpdatesBuilder {
 	if condition {
 		b.updates[key] = value
@@ -54,9 +61,9 @@ func (b *UpdatesBuilder) SetIf(condition bool, key string, value interface{}) *U
 // SetIfNotEmpty 设置字符串字段（非空时）
 // 支持 string 和 *wrapperspb.StringValue 类型
 // 使用 IsEmptyValue 进行严格的空值判断：
-// - 过滤空字符串、空白字符（空格、tab、换行等）
-// - 过滤 "null"、"undefined" 字符串（不区分大小写）
-// - 过滤 nil 值
+//   - 过滤空字符串、空白字符（空格、tab、换行等）
+//   - 过滤 "null"、"undefined" 字符串（不区分大小写）
+//   - 过滤 nil 值
 func (b *UpdatesBuilder) SetIfNotEmpty(key string, value interface{}) *UpdatesBuilder {
 	if value == nil {
 		return b

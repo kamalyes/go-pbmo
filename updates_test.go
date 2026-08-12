@@ -355,3 +355,13 @@ func TestUpdatesBuilderRealWorldScenario(t *testing.T) {
 	_, ok := result["icon"]
 	assert.False(t, ok)
 }
+
+func TestUpdatesBuilderSetNull(t *testing.T) {
+	result := NewUpdates().
+		Set("name", "test").
+		SetNull("callback_at").
+		Build()
+
+	assert.Equal(t, "test", result["name"])
+	assert.Nil(t, result["callback_at"])
+}
