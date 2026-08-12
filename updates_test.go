@@ -155,6 +155,34 @@ func TestUpdatesBuilderSetStringValAny(t *testing.T) {
 	assert.False(t, ok)
 }
 
+func TestUpdatesBuilderSetStringValOrEmpty(t *testing.T) {
+	b := NewUpdates().
+		SetStringValOrEmpty("name", wrapperspb.String("hello")).
+		SetStringValOrEmpty("empty", wrapperspb.String("")).
+		SetStringValOrEmpty("nil", nil)
+
+	result := b.Build()
+	assert.Equal(t, "hello", result["name"])
+	assert.Equal(t, "", result["empty"])
+	assert.Equal(t, "", result["nil"])
+}
+
+func TestUpdatesBuilderSetString(t *testing.T) {
+	b := NewUpdates().
+		SetString("name", "hello").
+		SetString("empty", "").
+		SetString("space", " ").
+		SetString("null", "null").
+		SetString("undefined", "undefined")
+
+	result := b.Build()
+	assert.Equal(t, "hello", result["name"])
+	for _, key := range []string{"empty", "space", "null", "undefined"} {
+		_, ok := result[key]
+		assert.False(t, ok, "key=%s should be filtered out", key)
+	}
+}
+
 func TestUpdatesBuilderSetJSON(t *testing.T) {
 	b := NewUpdates().
 		SetJSON("detail", "").

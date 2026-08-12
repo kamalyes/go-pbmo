@@ -100,6 +100,15 @@ func (b *UpdatesBuilder) SetIfNotZero(key string, value interface{}) *UpdatesBui
 
 // --- PB Wrapper 类型便捷方法 ---
 
+// SetString 设置 plain string 字段（空字符串/空白时跳过）
+// 用于 proto3 非 wrapper 的 string 字段，区分"未发送（默认空字符串）"和"有值"
+func (b *UpdatesBuilder) SetString(key string, val string) *UpdatesBuilder {
+	if !isEmptyUpdateString(val) {
+		b.updates[key] = val
+	}
+	return b
+}
+
 func (b *UpdatesBuilder) SetStringVal(key string, val *wrapperspb.StringValue) *UpdatesBuilder {
 	if val != nil && val.Value != "" {
 		b.updates[key] = val.Value
@@ -110,6 +119,17 @@ func (b *UpdatesBuilder) SetStringVal(key string, val *wrapperspb.StringValue) *
 func (b *UpdatesBuilder) SetStringValAny(key string, val *wrapperspb.StringValue) *UpdatesBuilder {
 	if val != nil {
 		b.updates[key] = val.Value
+	}
+	return b
+}
+
+// SetStringValOrEmpty 设置字段（nil 也写入空字符串，用于全量覆盖场景）
+// 与 SetStringValAny 的区别：nil 不跳过，而是写入 ""
+func (b *UpdatesBuilder) SetStringValOrEmpty(key string, val *wrapperspb.StringValue) *UpdatesBuilder {
+	if val != nil {
+		b.updates[key] = val.Value
+	} else {
+		b.updates[key] = ""
 	}
 	return b
 }
