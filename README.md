@@ -4,7 +4,7 @@
 
 **高性能 Protocol Buffer ↔ Model 双向转换库**
 
-*为 gRPC/REST 网关场景精心打造的 PB-Model 转换引擎，简单转换 ~40ns，批量转换反超原生代码*
+*为 gRPC/REST 网关场景精心打造的 PB-Model 转换引擎，热路径零分配，批量/并发/map 字段场景反超原生代码*
 
 <br>
 
@@ -24,19 +24,20 @@
 
 ## ✨ 特性亮点
 
-- 🚀 **高性能转换** - 简单 PB ↔ Model ~40ns，批量转换反超原生代码，unsafe 零拷贝 + 反射缓存双引擎
+- 🚀 **高性能转换** - 稳态热路径零分配，unsafe 零拷贝 + 反射缓存 + 类型特化三引擎，批量/并发场景反超原生代码
 - 🎯 **泛型便捷函数** - `ToPB` / `FromPB` / `ToPBs` / `FromPBs` 一行搞定，类型安全无需 reflect
 - 🔄 **双向转换** - PB → Model 和 Model → PB 一致性保证
 - 🗺️ **字段映射** - 支持 struct tag 和手动映射两种方式
 - ⚡ **字段转换器** - 自定义字段级别转换逻辑
 - ⏰ **自动时间转换** - `time.Time` ↔ `*timestamppb.Timestamp` 自动处理
 - ✅ **参数校验** - 字段级校验规则（必填、长度、范围、正则、自定义）
-- 📦 **批量转换** - 泛型批量 `ToPBs` / `FromPBs` / `SafeToPBs` / `SafeFromPBs`
+- 📦 **批量转换** - 泛型批量 `ToPBs` / `FromPBs`，安全批量 `SafeToPBs` / `SafeFromPBs` 支持值切片与指针切片自动适配
 - 🗂️ **注册中心** - `Register[M, P]()` 一行注册，`ConverterFor[M, P]()` 按需获取
 - 🔢 **枚举映射** - 支持 int32 和泛型枚举映射
 - 🎭 **脱敏转换** - 集成 go-toolbox/desensitize
 - 🛡️ **安全转换** - 集成 go-toolbox/safe 避免 nil panic
-- 🧩 **更新构建器** - `NewUpdates()` 链式构建局部更新，支持 JSON 字符串和 JSON Slice 字段
+- 🧩 **更新构建器** - `NewUpdates()` 链式构建局部更新，`PBToUpdates` / `ModelToUpdates` 一行输出 GORM Updates 字典
+- 🎁 **WKT 包装类型** - `wrapperspb` 包装类型与原生值/指针双向互转工具
 - ⚙️ **选项模式** - Functional Options + 链式调用灵活配置
 
 ## 🏗️ 架构概览
@@ -53,6 +54,7 @@ graph TB
     B --> B2["ToPB / FromPB<br/>单条转换"]
     B --> B3["ToPBs / FromPBs<br/>批量转换"]
     B --> B4["SafeToPBs / SafeFromPBs<br/>安全批量"]
+    B --> B5["PBToUpdates / ModelToUpdates<br/>更新字典直转"]
 
     C --> C1["📦 BidiConverter<br/>双向转换器"]
     C --> C2["📚 Batch<br/>批量转换"]
@@ -63,6 +65,7 @@ graph TB
     D --> D3["🔢 EnumMapper<br/>枚举映射"]
     D --> D4["🎭 Desensitize<br/>脱敏转换"]
     D --> D5["🛡️ SafeConverter<br/>安全转换"]
+    D --> D6["🎁 Wrapper 工具<br/>WKT 包装类型互转"]
 
     E --> E1["❌ Errors<br/>类型化错误"]
     E --> E2["⚙️ Options<br/>选项模式"]
@@ -128,7 +131,7 @@ func main() {
     models := []*UserModel{{ID: 1, Name: "a"}, {ID: 2, Name: "b"}}
     pbs, _ := pbmo.ToPBs[UserModel, UserPB](models)
 
-    // 安全批量转换（不因单个失败中断）
+    // 安全批量转换（不因单个失败中断，支持 []M 值切片与 []*M 指针切片）
     pbs2, result := pbmo.SafeToPBs[UserModel, UserPB](models)
     fmt.Printf("成功: %d, 失败: %d\n", result.SuccessCount, result.FailureCount)
 }
@@ -197,6 +200,20 @@ updates := pbmo.NewUpdates().
 
 `SetJSONSlice` 仅处理 slice/array，nil slice 会被跳过，非 nil 空切片会写入 `[]`。
 
+### 更新字典直转
+
+`PBToUpdates` / `ModelToUpdates` 一行将消息或结构体转为更新字典，自动跳过零值，适合直接传给 GORM `Updates`。字段 key 与偏移按类型缓存于更新计划，热路径零 tag 解析：
+
+```go
+// PB 按 protobuf json tag 名（snake_case）输出，自动解包 wrapper 类型
+updates := pbmo.PBToUpdates(req)
+
+// Model 按 gorm column tag 或 json tag 输出，跳过零值与不可导出字段
+updates := pbmo.ModelToUpdates(&user)
+
+db.Model(&User{}).Where("id = ?", 1).Updates(updates)
+```
+
 ## 📋 泛型 API 速查表
 
 | 函数 | 签名 | 说明 |
@@ -207,9 +224,11 @@ updates := pbmo.NewUpdates().
 | `FromPB` | `FromPB[P, M](pb *P) (*M, error)` | PB → Model |
 | `ToPBs` | `ToPBs[M, P](models []*M) ([]*P, error)` | 批量 Model → PB，遇错即停 |
 | `FromPBs` | `FromPBs[P, M](pbs []*P) ([]*M, error)` | 批量 PB → Model，遇错即停 |
-| `SafeToPBs` | `SafeToPBs[M, P](models []*M) ([]*P, *BatchResult)` | 安全批量 Model → PB |
+| `SafeToPBs` | `SafeToPBs[M, P](models []M) ([]*P, *BatchResult)` | 安全批量 Model → PB，支持 `[]M` 与 `[]*M` 自动适配 |
 | `SafeFromPBs` | `SafeFromPBs[P, M](pbs []*P) ([]*M, *BatchResult)` | 安全批量 PB → Model |
 | `ConverterFor` | `ConverterFor[M, P]() *BidiConverter` | 获取已注册的转换器 |
+| `PBToUpdates` | `PBToUpdates[P](pb *P) map[string]interface{}` | PB → 更新字典，protobuf json tag 作 key，跳过零值并解包 wrapper |
+| `ModelToUpdates` | `ModelToUpdates[M](m *M) map[string]interface{}` | Model → 更新字典，gorm column/json tag 作 key，跳过零值 |
 
 ## 🔄 迁移指南
 
@@ -241,80 +260,95 @@ updates := pbmo.NewUpdates().
 | 🛡️ 安全转换 | [safe.go](safe.go) | nil 安全转换 | 防止 panic |
 | ⏰ 时间转换 | [time.go](time.go) | Time ↔ Timestamp | 时间字段处理 |
 | 🧩 更新构建器 | [updates.go](updates.go) | 链式构建局部更新字段 | GORM Updates、JSON 字段更新 |
+| 📋 更新计划 | [updates_plan.go](updates_plan.go) | 更新字典字段计划缓存 | PBToUpdates / ModelToUpdates 热路径 |
+| 🎁 包装类型 | [wrappers.go](wrappers.go) | WKT 包装类型互转工具 | wrapperspb ↔ 原生值/指针 |
 | 🔧 辅助函数 | [helpers.go](helpers.go) | 反射工具、类型判断 | 内部使用 |
 | ❌ 错误定义 | [errors.go](errors.go) | 类型化错误体系 | 错误处理 |
 | ⚙️ 选项模式 | [option.go](option.go) | Functional Options | 配置管理 |
 
 ## 📊 性能基准
 
-基于 `go test -bench=. -benchmem -benchtime=3s` 测试结果，与手写原生转换代码对比：
+基于 `go test -bench=. -benchmem -benchtime=3s` 实测，与手写原生转换代码对比，完整数据见 [go-pbmo-benchmark](https://github.com/kamalyes/go-pbmo-benchmark)：
 
-> **单位说明**: `ns` = 纳秒（10⁻⁹秒），`µs` = 微秒（10⁻⁶秒，1µs = 1000ns）
-
-**测试环境**: Windows AMD64 · Go 1.25 · Intel i7-12700KF @ 3.60GHz
+> **单位说明**: `ns` = 纳秒（10⁻⁹秒），`µs` = 微秒（10⁻⁶秒，1µs = 1000ns）；对比列 `PBMO/原生`，**< 1 表示 PBMO 反超**
+> **测试环境**: Windows AMD64 · Go 1.25 · Intel i5-9300H @ 2.40GHz · 8 逻辑核
 
 ### 核心转换（PBMO vs 原生）
 
-| 场景 | PBMO | 原生 | 差距 | 内存 | 分配次数 |
-|------|------|------|------|------|----------|
-| 简单 PB→Model | **40.8 ns** | 32.1 ns | 1.27x | 48 B | 1 |
-| 简单 Model→PB | **40.0 ns** | 30.5 ns | 1.31x | 48 B | 1 |
-| 带字段映射 PB→Model | **39.7 ns** | 29.6 ns | 1.34x | 48 B | 1 |
-| 带字段映射 Model→PB | **38.1 ns** | 29.8 ns | 1.28x | 48 B | 1 |
-| 中等 PB→Model | **47.8 ns** | 32.1 ns | 1.49x | 96 B | 1 |
-| 中等 Model→PB | **45.5 ns** | 34.8 ns | 1.31x | 96 B | 1 |
-| 完整 PB→Model | **109 ns** | 80.3 ns | 1.36x | 184 B | 4 |
-| 完整 Model→PB | **182 ns** | 162 ns | 1.13x | 416 B | 6 |
-| 大型 PB→Model | **121 ns** | 84.8 ns | 1.43x | 296 B | 3 |
-| 大型 Model→PB | **178 ns** | 143 ns | 1.24x | 448 B | 5 |
-| 30字段 PB→Model | **194 ns** | 142 ns | 1.37x | 448 B | 1 |
-| 50字段 PB→Model | **300 ns** | 239 ns | 1.26x | 770 B | 3 |
+| 模型（结构特征） | 场景 | PBMO | 原生 | 对比 | 内存 | 分配 |
+|------|------|------|------|------|------|------|
+| Simple（8 字段平铺） | PB→Model | 434.2 ns | 155.3 ns | 2.80x | 48 B | 1 |
+| Simple（8 字段平铺） | Model→PB | 775.1 ns | 259.3 ns | 2.99x | 48 B | 1 |
+| Mapped（字段映射） | PB→Model | 177.9 ns | 134.5 ns | 1.32x | 48 B | 1 |
+| Mapped（字段映射） | Model→PB | 178.9 ns | 135.7 ns | 1.32x | 48 B | 1 |
+| Medium（含切片/时间） | PB→Model | **213.8 ns** | 339.1 ns | **0.63x** | 96 B | 1 |
+| Full（多类型混合） | PB→Model | 798.1 ns | 585.4 ns | 1.36x | 184 B | 4 |
+| Large（大结构） | PB→Model | 1426 ns | 1177 ns | 1.21x | 296 B | 3 |
+| Huge30（30 字段） | PB→Model | 814.8 ns | 514.8 ns | 1.58x | 448 B | 1 |
+| Huge100（100 字段） | PB→Model | 5205 ns | 3975 ns | 1.31x | 1328 B | 1 |
+| DeepNested4（4 层嵌套） | PB→Model | 528.4 ns | 301.2 ns | 1.75x | 224 B | 3 |
+| Enterprise（多层聚合） | PB→Model | 5784 ns | 1510 ns | 3.83x | 368 B | 1 |
 
-### 复杂场景（PBMO vs 原生）
+### 类型特征场景（PBMO vs 原生）
 
-| 场景 | PBMO | 原生 | 差距 | 说明 |
+| 场景 | PBMO | 原生 | 对比 | 说明 |
 |------|------|------|------|------|
-| Config PB→Model | **63.2 ns** | 49.3 ns | 1.28x | map[string]any 转换 |
-| Config Model→PB | **45.7 ns** | 251 ns | **0.18x** | PBMO 快 5.5x |
-| ScoreBoard PB→Model | **148 ns** | 237 ns | **0.62x** | PBMO 快 1.6x |
-| Metadata PB→Model | **114 ns** | 60.3 ns | 1.89x | 值类型输入 |
-| Wrapper PB→Model | **91.9 ns** | 77.8 ns | 1.18x | WKT 包装类型 |
-| Wrapper Model→PB | **161 ns** | 147 ns | 1.09x | |
-| 时间指针 PB→Model | **65.3 ns** | 63.0 ns | 1.04x | *time.Time 转换 |
-| NamedSlice PB→Model | **46.4 ns** | 35.1 ns | 1.32x | 类型别名切片 |
-| 深嵌套4层 PB→Model | **152 ns** | 95.0 ns | 1.60x | |
-| 企业级 PB→Model | **311 ns** | 246 ns | 1.26x | 多层嵌套+切片 |
+| Config Model→PB | **260.0 ns** | 3597 ns | **0.07x** | map 字段转换 PBMO 快 13.8x |
+| Config PB→Model | 323.4 ns | 226.8 ns | 1.43x | map[string]any 写入 |
+| ScoreBoard Model→PB | 713.0 ns | 386.6 ns | 1.84x | 计分板切片聚合 |
+| Wrapper Model→PB | **857.9 ns** | 1161 ns | **0.74x** | WKT 包装类型 PBMO 快 1.4x |
+| TimePtr Model→PB | **246.9 ns** | 251.8 ns | **0.98x** | *time.Time 与原生持平 |
+| TimeZero PB→Model | 224.3 ns | 120.0 ns | 1.87x | 零值时间自动归零 |
+| NamedSlice PB→Model | 162.6 ns | 133.1 ns | 1.22x | 类型别名切片 |
+| Metadata PB→Model | 126.7 ns | 74.1 ns | 1.71x | 极小结构（24 B/1 alloc） |
 
-### 并发转换（PBMO vs 原生）
+### 更新字典（PBMO vs 原生）
 
-| 场景 | PBMO | 原生 | 差距 |
+| 场景 | PBMO | 原生 | 对比 | 内存 | 分配 |
+|------|------|------|------|------|------|
+| PBToUpdates | 1.87 µs | 973 ns | 1.92x | 744 B | 8 |
+| ModelToUpdates | 1.47 µs | 1.06 µs | 1.39x | 840 B | 11 |
+| UpdatesBuilder 链式构建 | **2.26 µs** | 3.34 µs | **0.68x** | 480 B | 11 |
+
+> 💡 更新字典直转按类型缓存字段计划，热路径零 tag 解析、零 reflect.Value 构造；wrapper 解包与 nil 指针跳过按字段种类特化为直读比较
+
+### 注册中心（PBMO vs 原生）
+
+| 场景 | PBMO | 原生 | 对比 | 内存 | 分配 |
+|------|------|------|------|------|------|
+| Register 热路径 | **21.2 ns** | - | - | 0 B | 0 |
+| ConverterFor | **23.0 ns** | - | - | 0 B | 0 |
+| 批量注册 6 类型对轮换 | **151 ns** | 553 ns | **0.27x** | 0 B | 0 |
+| Registry.Lookup | 74.1 ns | 35.1 ns | 2.11x | 0 B | 0 |
+
+> 💡 Register/ConverterFor 命中 32 槽热路径缓存零分配，黄金比例散列保证多类型对不互相驱逐；批量注册场景比手写 map 反超 3.7x
+
+### 并发与批量转换（PBMO vs 原生）
+
+| 场景 | PBMO | 原生 | 对比 |
 |------|------|------|------|
-| 简单并发 PB→Model | **13.4 ns** | 13.8 ns | **0.97x** |
-| 大型并发 PB→Model | **92.4 ns** | 97.8 ns | **0.94x** |
-| 深嵌套并发 PB→Model | **74.5 ns** | 152 ns | **0.49x** |
-| 企业级并发 PB→Model | **117 ns** | 124 ns | **0.95x** |
-| Wrapper 并发 PB→Model | **25.6 ns** | 30.7 ns | **0.83x** |
+| Simple 并发 PB→Model | 125.0 ns | 78.5 ns | 1.59x |
+| Wrapper 并发 PB→Model | **440.0 ns** | 4111 ns | **0.11x** |
+| Outer 并发 PB→Model | **298.3 ns** | 543.9 ns | **0.55x** |
+| DeepNested4 并发 PB→Model | 355.9 ns | 294.5 ns | 1.21x |
+| Simple 批量 100 条 PB→Model | **13.9 µs** | 27.6 µs | **0.50x** |
+| Simple 批量 1000 条 PB→Model | **211 µs** | 229 µs | **0.92x** |
+| Simple BatchConvert 100 条 | **8.2 µs** | 9.5 µs | **0.86x** |
+| DeepNested4 批量 100 条 | 44.4 µs | 32.3 µs | 1.38x |
 
-### 批量转换（PBMO vs 原生）
+> 💡 批量转换采用预分配 + unsafe 批量拷贝，100 条批量分配 2 次而原生需 101 次；并发场景 Wrapper 反超 9x（原生 Protobuf 反射有锁竞争）
 
-| 场景 | PBMO | 原生 | 差距 | PBMO 分配次数 | 原生分配次数 |
-|------|------|------|------|-------------|-------------|
-| 批量 100 条 | **2.58µs** | 3.33µs | **0.77x** | 2 | 101 |
-| 批量 1000 条 | **27.2µs** | 34.6µs | **0.79x** | 2 | 1001 |
-| 大型批量 100 条 | **11.1µs** | 10.4µs | 1.06x | 202 | 301 |
-| 深嵌套批量 100 条 | **13.8µs** | 10.5µs | 1.32x | 302 | 401 |
+### 内部组件
 
-> 💡 PBMO 批量转换采用预分配 + unsafe 批量拷贝策略，分配次数远少于原生逐条转换，在简单场景下批量性能反超原生代码
+| 场景 | 耗时 | 内存 | 分配 |
+|------|------|------|------|
+| EnumMapper.Map | 73.7 ns | 0 B | 0 |
+| GenericEnumMapper.Map | 74.3 ns | 0 B | 0 |
+| AutoEnumConverter.Convert | 49.8 ns | 0 B | 0 |
+| TransformerRegistry.Apply | 439.4 ns | 48 B | 3 |
+| NewBidiConverter（构建期一次） | 728.6 ns | 256 B | 2 |
 
-### 枚举映射
-
-| 场景 | 中位数耗时 | 内存分配 | 分配次数 |
-|------|-----------|----------|----------|
-| EnumMapper.Map | **33ns** | 0 B | 0 |
-| GenericEnumMapper.Map | **36ns** | 0 B | 0 |
-| AutoEnumConverter.Convert | **52ns** | 0 B | 0 |
-
-> 💡 完整基准测试代码位于 [go-pbmo-benchmark](https://github.com/kamalyes/go-pbmo-benchmark) 项目
+> 💡 平铺字段单对象场景原生手写赋值更快属物理极限（零反射零间接调用）；PBMO 的价值在批量/并发/map 字段/字段映射/更新字典场景的反超与全场景零样板代码
 
 ## 🧪 测试
 
