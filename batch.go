@@ -21,7 +21,7 @@ func (bc *BidiConverter) convertPBToModelPtrCached(pbPtr, modelPtr unsafe.Pointe
 	if pbPtr == nil || modelPtr == nil {
 		return nil
 	}
-	if cache.mergedCopyFunc != nil && !cache.hasTransformers {
+	if cache.mergedCopyFunc != nil {
 		cache.mergedCopyFunc(pbPtr, modelPtr)
 		if len(cache.slowEntries) == 0 {
 			return nil
@@ -47,9 +47,6 @@ func (bc *BidiConverter) convertPBToModelPtrCached(pbPtr, modelPtr unsafe.Pointe
 		if !srcField.IsValid() || !dstField.IsValid() {
 			continue
 		}
-		if cache.hasTransformers && bc.transformers.Has(entry.srcName) {
-			srcField = bc.transformers.Apply(entry.srcName, srcField)
-		}
 		if err := convertFieldByKind(srcField, dstField, entry); err != nil {
 			return NewConversionError("field %s conversion failed: %v", entry.srcName, err)
 		}
@@ -62,7 +59,7 @@ func (bc *BidiConverter) convertModelToPBPtrCached(modelPtr, pbPtr unsafe.Pointe
 	if modelPtr == nil || pbPtr == nil {
 		return nil
 	}
-	if cache.mergedCopyFunc != nil && !cache.hasTransformers {
+	if cache.mergedCopyFunc != nil {
 		cache.mergedCopyFunc(modelPtr, pbPtr)
 		if len(cache.slowEntries) == 0 {
 			return nil
@@ -87,9 +84,6 @@ func (bc *BidiConverter) convertModelToPBPtrCached(modelPtr, pbPtr unsafe.Pointe
 		dstField := reflect.NewAt(entry.dstType, addPtr(pbPtr, entry.dstOffset)).Elem()
 		if !srcField.IsValid() || !dstField.IsValid() {
 			continue
-		}
-		if cache.hasTransformers && bc.transformers.Has(entry.srcName) {
-			srcField = bc.transformers.Apply(entry.srcName, srcField)
 		}
 		if err := convertFieldByKind(srcField, dstField, entry); err != nil {
 			return NewConversionError("field %s conversion failed: %v", entry.srcName, err)
@@ -117,7 +111,7 @@ func (bc *BidiConverter) convertPBToModelCached(pbVal, modelVal reflect.Value, c
 	}
 
 	canFastPath := pbVal.CanAddr() && modelVal.CanAddr()
-	if canFastPath && cache.mergedCopyFunc != nil && !cache.hasTransformers {
+	if canFastPath && cache.mergedCopyFunc != nil {
 		srcBase := unsafe.Pointer(pbVal.UnsafeAddr())
 		dstBase := unsafe.Pointer(modelVal.UnsafeAddr())
 		cache.mergedCopyFunc(srcBase, dstBase)
@@ -142,6 +136,9 @@ func (bc *BidiConverter) convertPBToModelCached(pbVal, modelVal reflect.Value, c
 			if !srcField.IsValid() || !dstField.IsValid() || !dstField.CanSet() {
 				continue
 			}
+			if entry.transformFn != nil {
+				srcField = reflect.ValueOf(entry.transformFn(srcField.Interface()))
+			}
 			if err := convertFieldByKind(srcField, dstField, entry); err != nil {
 				return NewConversionError("字段 %s 转换失败: %v", entry.srcName, err)
 			}
@@ -163,9 +160,6 @@ func (bc *BidiConverter) convertPBToModelCached(pbVal, modelVal reflect.Value, c
 			if !srcField.IsValid() || !dstField.IsValid() {
 				continue
 			}
-			if cache.hasTransformers && bc.transformers.Has(entry.srcName) {
-				srcField = bc.transformers.Apply(entry.srcName, srcField)
-			}
 			if err := convertFieldByKind(srcField, dstField, entry); err != nil {
 				return NewConversionError("字段 %s 转换失败: %v", entry.srcName, err)
 			}
@@ -177,9 +171,6 @@ func (bc *BidiConverter) convertPBToModelCached(pbVal, modelVal reflect.Value, c
 			dstField := modelVal.FieldByIndex(entry.dstIndex)
 			if !srcField.IsValid() || !dstField.IsValid() {
 				continue
-			}
-			if cache.hasTransformers && bc.transformers.Has(entry.srcName) {
-				srcField = bc.transformers.Apply(entry.srcName, srcField)
 			}
 			if err := convertFieldByKind(srcField, dstField, entry); err != nil {
 				return NewConversionError("字段 %s 转换失败: %v", entry.srcName, err)
@@ -208,7 +199,7 @@ func (bc *BidiConverter) convertModelToPBCached(modelVal, pbVal reflect.Value, c
 	}
 
 	canFastPath := modelVal.CanAddr() && pbVal.CanAddr()
-	if canFastPath && cache.mergedCopyFunc != nil && !cache.hasTransformers {
+	if canFastPath && cache.mergedCopyFunc != nil {
 		srcBase := unsafe.Pointer(modelVal.UnsafeAddr())
 		dstBase := unsafe.Pointer(pbVal.UnsafeAddr())
 		cache.mergedCopyFunc(srcBase, dstBase)
@@ -233,6 +224,9 @@ func (bc *BidiConverter) convertModelToPBCached(modelVal, pbVal reflect.Value, c
 			if !srcField.IsValid() || !dstField.IsValid() || !dstField.CanSet() {
 				continue
 			}
+			if entry.transformFn != nil {
+				srcField = reflect.ValueOf(entry.transformFn(srcField.Interface()))
+			}
 			if err := convertFieldByKind(srcField, dstField, entry); err != nil {
 				return NewConversionError("字段 %s 转换失败: %v", entry.srcName, err)
 			}
@@ -254,9 +248,6 @@ func (bc *BidiConverter) convertModelToPBCached(modelVal, pbVal reflect.Value, c
 			if !srcField.IsValid() || !dstField.IsValid() {
 				continue
 			}
-			if cache.hasTransformers && bc.transformers.Has(entry.srcName) {
-				srcField = bc.transformers.Apply(entry.srcName, srcField)
-			}
 			if err := convertFieldByKind(srcField, dstField, entry); err != nil {
 				return NewConversionError("字段 %s 转换失败: %v", entry.srcName, err)
 			}
@@ -268,9 +259,6 @@ func (bc *BidiConverter) convertModelToPBCached(modelVal, pbVal reflect.Value, c
 			dstField := pbVal.FieldByIndex(entry.dstIndex)
 			if !srcField.IsValid() || !dstField.IsValid() {
 				continue
-			}
-			if cache.hasTransformers && bc.transformers.Has(entry.srcName) {
-				srcField = bc.transformers.Apply(entry.srcName, srcField)
 			}
 			if err := convertFieldByKind(srcField, dstField, entry); err != nil {
 				return NewConversionError("字段 %s 转换失败: %v", entry.srcName, err)
@@ -329,7 +317,7 @@ func (bc *BidiConverter) BatchConvertPBToModel(pbs interface{}, modelsPtr interf
 		modelBase = models.UnsafePointer()
 		modelSize = modelType.Size()
 	}
-	if !isModelPtr && cache.mergedCopyFunc != nil && !cache.hasTransformers && len(cache.slowEntries) == 0 {
+	if !isModelPtr && cache.mergedCopyFunc != nil && len(cache.slowEntries) == 0 {
 		for i := 0; i < pbsVal.Len(); i++ {
 			pbPtr := batchElementPtr(pbsVal, pbType, isPBPtr, i)
 			if pbPtr != nil {
@@ -401,7 +389,7 @@ func (bc *BidiConverter) BatchConvertModelToPB(models interface{}, pbsPtr interf
 		pbBase = pbs.UnsafePointer()
 		pbSize = pbType.Size()
 	}
-	if !isPBPtr && cache.mergedCopyFunc != nil && !cache.hasTransformers && len(cache.slowEntries) == 0 {
+	if !isPBPtr && cache.mergedCopyFunc != nil && len(cache.slowEntries) == 0 {
 		for i := 0; i < modelsVal.Len(); i++ {
 			modelPtr := batchElementPtr(modelsVal, modelType, isModelPtr, i)
 			if modelPtr != nil {

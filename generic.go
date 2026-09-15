@@ -124,7 +124,7 @@ func ToPB[M any, P any](m *M) (*P, error) {
 	e := getOrInitCachedConverter[M, P]()
 	cache := e.modelToPB
 	info := new(P)
-	if cache.mergedCopyFunc != nil && !cache.hasTransformers && len(cache.slowEntries) == 0 {
+	if cache.mergedCopyFunc != nil && len(cache.slowEntries) == 0 {
 		cache.mergedCopyFunc(unsafe.Pointer(m), unsafe.Pointer(info))
 		return info, nil
 	}
@@ -139,7 +139,7 @@ func FromPB[P any, M any](pb *P) (*M, error) {
 	e := getOrInitCachedConverter[M, P]()
 	cache := e.pbToModel
 	model := new(M)
-	if cache.mergedCopyFunc != nil && !cache.hasTransformers && len(cache.slowEntries) == 0 {
+	if cache.mergedCopyFunc != nil && len(cache.slowEntries) == 0 {
 		cache.mergedCopyFunc(unsafe.Pointer(pb), unsafe.Pointer(model))
 		return model, nil
 	}
@@ -155,7 +155,7 @@ func ToPBs[M any, P any](models []*M) ([]*P, error) {
 	e := getOrInitCachedConverter[M, P]()
 	cache := e.modelToPB
 	values := make([]P, len(models))
-	if cache.mergedCopyFunc != nil && !cache.hasTransformers && len(cache.slowEntries) == 0 {
+	if cache.mergedCopyFunc != nil && len(cache.slowEntries) == 0 {
 		for i, m := range models {
 			p := &values[i]
 			if m != nil {
@@ -185,7 +185,7 @@ func FromPBs[P any, M any](pbs []*P) ([]*M, error) {
 	e := getOrInitCachedConverter[M, P]()
 	cache := e.pbToModel
 	values := make([]M, len(pbs))
-	if cache.mergedCopyFunc != nil && !cache.hasTransformers && len(cache.slowEntries) == 0 {
+	if cache.mergedCopyFunc != nil && len(cache.slowEntries) == 0 {
 		for i, pb := range pbs {
 			m := &values[i]
 			if pb != nil {
@@ -229,7 +229,7 @@ func SafeToPBs[M any, P any](models []M) ([]*P, *BatchResult) {
 			c = getOrInitConverter[M, P]()
 		}
 		cache := c.modelToPBFieldCache()
-		pureFast := cache.mergedCopyFunc != nil && !cache.hasTransformers && len(cache.slowEntries) == 0
+		pureFast := cache.mergedCopyFunc != nil && len(cache.slowEntries) == 0
 		for i := range models {
 			item := BatchItem{Index: i}
 			v := reflect.ValueOf(models[i])
@@ -262,7 +262,7 @@ func SafeToPBs[M any, P any](models []M) ([]*P, *BatchResult) {
 	} else {
 		c := getOrInitConverter[M, P]()
 		cache := c.modelToPBFieldCache()
-		pureFast := cache.mergedCopyFunc != nil && !cache.hasTransformers && len(cache.slowEntries) == 0
+		pureFast := cache.mergedCopyFunc != nil && len(cache.slowEntries) == 0
 		for i := range models {
 			item := BatchItem{Index: i}
 			p := &values[i]
@@ -300,7 +300,7 @@ func SafeFromPBs[P any, M any](pbs []*P) ([]*M, *BatchResult) {
 	values := make([]M, len(pbs))
 	c := getOrInitConverter[M, P]()
 	cache := c.pbToModelFieldCache()
-	pureFast := cache.mergedCopyFunc != nil && !cache.hasTransformers && len(cache.slowEntries) == 0
+	pureFast := cache.mergedCopyFunc != nil && len(cache.slowEntries) == 0
 
 	for i, pb := range pbs {
 		item := BatchItem{Index: i}

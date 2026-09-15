@@ -124,33 +124,32 @@ const (
 // fastEntries：有 copyFunc 的字段（走 unsafe 快速路径）
 // slowEntries：无 copyFunc 的字段（走 reflect 慢速路径）
 type fieldMappingEntry struct {
-	srcIndex     []int             // 源字段索引（用于 FieldByIndex 回退路径）
-	dstIndex     []int             // 目标字段索引
-	srcType      reflect.Type      // 源字段类型
-	dstType      reflect.Type      // 目标字段类型
-	kind         fieldKind         // 字段类型分类
-	srcName      string            // 源字段名（用于 Transformer 查找）
-	dstName      string            // 目标字段名
-	wrapperConv  *wrapperConverter // Wrapper 类型转换器（仅 fieldWrapper 使用）
-	wrapperDir   int               // Wrapper 方向：0=value→wrapper, 1=wrapper→value
-	srcOffset    uintptr           // 源字段在结构体中的偏移量（unsafe 路径直接使用）
-	dstOffset    uintptr           // 目标字段在结构体中的偏移量
-	fieldSize    uintptr           // 源字段大小（用于内存拷贝）
-	copyFunc     fieldCopyFunc     // 预生成的 unsafe 转换闭包（nil 则走 reflect 慢路径）
-	hasTransform bool              // 是否有 Transformer 注册（影响缓存分层）
+	srcIndex    []int             // 源字段索引（用于 FieldByIndex 回退路径）
+	dstIndex    []int             // 目标字段索引
+	srcType     reflect.Type      // 源字段类型
+	dstType     reflect.Type      // 目标字段类型
+	kind        fieldKind         // 字段类型分类
+	srcName     string            // 源字段名（用于 Transformer 查找）
+	dstName     string            // 目标字段名
+	wrapperConv *wrapperConverter // Wrapper 类型转换器（仅 fieldWrapper 使用）
+	wrapperDir  int               // Wrapper 方向：0=value→wrapper, 1=wrapper→value
+	srcOffset   uintptr           // 源字段在结构体中的偏移量（unsafe 路径直接使用）
+	dstOffset   uintptr           // 目标字段在结构体中的偏移量
+	fieldSize   uintptr           // 源字段大小（用于内存拷贝）
+	copyFunc    fieldCopyFunc     // 预生成的 unsafe 转换闭包（nil 则走 reflect 慢路径）
+	transformFn TransformerFunc   // 预绑定的字段转换器（reflect 回退路径使用，避免动态查询注册表）
 }
 
 // fieldCache 字段缓存，包含 PB→Model 和 Model→PB 双向映射
 // 生命周期：在 ensureFieldCache 中懒加载构建，随 BidiConverter 缓存
-// 核心优化：fastEntries 全部有 copyFunc，可完全绕过 reflect
+// 核心优化：fastEntries 全部有 copyFunc（含 transformer 专用闭包），可完全绕过 reflect
 type fieldCache struct {
-	srcType         reflect.Type                          // 源类型（用于类型校验）
-	dstType         reflect.Type                          // 目标类型（用于类型校验）
-	fastEntries     []fieldMappingEntry                   // 快速路径字段（有 copyFunc）
-	slowEntries     []fieldMappingEntry                   // 慢速路径字段（需 reflect）
-	autoTime        bool                                  // 是否启用自动时间转换
-	hasTransformers bool                                  // 是否有 Transformer（预计算，避免每次 Count()）
-	mergedCopyFunc  func(srcBase, dstBase unsafe.Pointer) // 合并的快速路径闭包，一次调用完成所有 fast 字段拷贝
+	srcType        reflect.Type                          // 源类型（用于类型校验）
+	dstType        reflect.Type                          // 目标类型（用于类型校验）
+	fastEntries    []fieldMappingEntry                   // 快速路径字段（有 copyFunc）
+	slowEntries    []fieldMappingEntry                   // 慢速路径字段（需 reflect）
+	autoTime       bool                                  // 是否启用自动时间转换
+	mergedCopyFunc func(srcBase, dstBase unsafe.Pointer) // 合并的快速路径闭包，一次调用完成所有 fast 字段拷贝
 }
 
 // structFieldEntry 嵌套结构体字段映射条目
@@ -220,7 +219,7 @@ func ifaceDataPtr(iface interface{}) unsafe.Pointer {
 
 // applyFastPath 应用快速路径的 unsafe 拷贝
 func (bc *BidiConverter) applyFastPath(cache *fieldCache, srcBase, dstBase unsafe.Pointer, srcVal, dstVal reflect.Value) error {
-	if cache.mergedCopyFunc != nil && !cache.hasTransformers {
+	if cache.mergedCopyFunc != nil {
 		cache.mergedCopyFunc(srcBase, dstBase)
 	} else if len(cache.fastEntries) > 0 {
 		if cache.mergedCopyFunc != nil {
@@ -263,9 +262,6 @@ func (bc *BidiConverter) applySlowEntries(cache *fieldCache, srcVal, dstVal refl
 			if !srcField.IsValid() || !dstField.IsValid() {
 				continue
 			}
-			if cache.hasTransformers && bc.transformers.Has(entry.srcName) {
-				srcField = bc.transformers.Apply(entry.srcName, srcField)
-			}
 			if err := convertFieldByKind(srcField, dstField, entry); err != nil {
 				return NewConversionError("字段 %s 转换失败: %v", entry.srcName, err)
 			}
@@ -278,15 +274,57 @@ func (bc *BidiConverter) applySlowEntries(cache *fieldCache, srcVal, dstVal refl
 			if !srcField.IsValid() || !dstField.IsValid() {
 				continue
 			}
-			if cache.hasTransformers && bc.transformers.Has(entry.srcName) {
-				srcField = bc.transformers.Apply(entry.srcName, srcField)
-			}
 			if err := convertFieldByKind(srcField, dstField, entry); err != nil {
 				return NewConversionError("字段 %s 转换失败: %v", entry.srcName, err)
 			}
 		}
 	}
 	return nil
+}
+
+// makeTransformCopyFunc 生成带字段转换器的拷贝闭包
+// 直接偏移定位字段并应用转换器，使含 transformer 的字段并入快速路径
+// 而非将整个结构体拖入 reflect 慢路径
+// 同类型字段走专用写回路径，避免 convertFieldByKind 的 reflect 包装开销
+// 类型不匹配时回退 convertFieldByKind，输出无法写入目标时保持目标值不变
+func makeTransformCopyFunc(entry fieldMappingEntry, fn TransformerFunc) fieldCopyFunc {
+	if entry.kind == fieldSameType && entry.srcType == entry.dstType {
+		dstOffset := entry.dstOffset
+		return func(srcBase, dstBase unsafe.Pointer) {
+			srcField := reflect.NewAt(entry.srcType, addPtr(srcBase, entry.srcOffset)).Elem()
+			if !srcField.IsValid() {
+				return
+			}
+			switch out := fn(srcField.Interface()).(type) {
+			case string:
+				*(*string)(addPtr(dstBase, dstOffset)) = out
+			case int:
+				*(*int)(addPtr(dstBase, dstOffset)) = out
+			case int64:
+				*(*int64)(addPtr(dstBase, dstOffset)) = out
+			case uint64:
+				*(*uint64)(addPtr(dstBase, dstOffset)) = out
+			case float64:
+				*(*float64)(addPtr(dstBase, dstOffset)) = out
+			case bool:
+				*(*bool)(addPtr(dstBase, dstOffset)) = out
+			default:
+				dstField := reflect.NewAt(entry.dstType, addPtr(dstBase, dstOffset)).Elem()
+				if dstField.IsValid() && dstField.CanSet() {
+					_ = convertFieldByKind(reflect.ValueOf(out), dstField, &entry)
+				}
+			}
+		}
+	}
+	return func(srcBase, dstBase unsafe.Pointer) {
+		srcField := reflect.NewAt(entry.srcType, addPtr(srcBase, entry.srcOffset)).Elem()
+		dstField := reflect.NewAt(entry.dstType, addPtr(dstBase, entry.dstOffset)).Elem()
+		if !srcField.IsValid() || !dstField.IsValid() || !dstField.CanSet() {
+			return
+		}
+		out := fn(srcField.Interface())
+		_ = convertFieldByKind(reflect.ValueOf(out), dstField, &entry)
+	}
 }
 
 // makeSameTypeCopyFunc 根据字段类型生成安全指针转换函数
@@ -2318,10 +2356,9 @@ func lookupWrapper(srcType, dstType reflect.Type) (*wrapperConverter, int) {
 //  2. 确定方向（Model→PB 用正向映射，PB→Model 用反向映射）
 //  3. 遍历源类型字段，匹配目标字段，调用 classifyField 分类
 //  4. 为每个字段生成 copyFunc（如果可以生成 unsafe 闭包）
-//  5. 有 copyFunc 且无 Transformer 的字段 → fastEntries
+//  5. 有 copyFunc 的字段 → fastEntries
 //  6. 其余字段 → slowEntries
 //  7. 构建 mergedCopyFunc 合并所有 fastEntries 的 copyFunc 为单次调用闭包
-//  8. 预计算 hasTransformers 标志，避免每次调用 Count()
 func buildFieldCache(srcType, dstType reflect.Type, srcIsModel bool, opts *Options, transformers *TransformerRegistry) *fieldCache {
 	dstFields := make(map[string]reflect.StructField)
 	for i := 0; i < dstType.NumField(); i++ {
@@ -2423,47 +2460,55 @@ func buildFieldCache(srcType, dstType reflect.Type, srcIsModel bool, opts *Optio
 
 		kind, wc, dir := classifyField(srcField.Type, dstField.Type, autoTime)
 
-		hasTransform := transformers != nil && transformers.Has(srcField.Name)
-
-		copyFn := makeFieldCopyFunc(kind, srcField.Type, dstField.Type,
-			srcField.Offset, dstField.Offset, wc, dir)
+		// transformer 字段生成专用拷贝闭包并入快速路径
+		// 未注册 transformer 时 Lookup 返回 false，与此前 Has+Apply 双次查询等价且仅一次查询
+		var fn TransformerFunc
+		hasTransform := false
+		if transformers != nil {
+			fn, hasTransform = transformers.Lookup(srcField.Name)
+		}
 
 		entry := fieldMappingEntry{
-			srcIndex:     srcField.Index,
-			dstIndex:     dstField.Index,
-			srcType:      srcField.Type,
-			dstType:      dstField.Type,
-			kind:         kind,
-			srcName:      srcField.Name,
-			dstName:      dstField.Name,
-			wrapperConv:  wc,
-			wrapperDir:   dir,
-			srcOffset:    srcField.Offset,
-			dstOffset:    dstField.Offset,
-			fieldSize:    srcField.Type.Size(),
-			copyFunc:     copyFn,
-			hasTransform: hasTransform,
+			srcIndex:    srcField.Index,
+			dstIndex:    dstField.Index,
+			srcType:     srcField.Type,
+			dstType:     dstField.Type,
+			kind:        kind,
+			srcName:     srcField.Name,
+			dstName:     dstField.Name,
+			wrapperConv: wc,
+			wrapperDir:  dir,
+			srcOffset:   srcField.Offset,
+			dstOffset:   dstField.Offset,
+			fieldSize:   srcField.Type.Size(),
 		}
 
-		if copyFn != nil && !hasTransform {
+		switch {
+		case hasTransform:
+			// 专用闭包内部走 convertFieldByKind，覆盖 copyFunc 为 nil 的字段组合
+			entry.copyFunc = makeTransformCopyFunc(entry, fn)
+			entry.transformFn = fn // reflect 回退路径（FieldByIndex）也需要应用转换器
 			fastEntries = append(fastEntries, entry)
-		} else {
-			slowEntries = append(slowEntries, entry)
+		default:
+			entry.copyFunc = makeFieldCopyFunc(kind, srcField.Type, dstField.Type,
+				srcField.Offset, dstField.Offset, wc, dir)
+			if entry.copyFunc != nil {
+				fastEntries = append(fastEntries, entry)
+			} else {
+				slowEntries = append(slowEntries, entry)
+			}
 		}
 	}
-
-	hasTransformersFlag := transformers != nil && transformers.Count() > 0
 
 	mergedFn := buildMergedCopyFunc(fastEntries)
 
 	return &fieldCache{
-		srcType:         srcType,
-		dstType:         dstType,
-		fastEntries:     fastEntries,
-		slowEntries:     slowEntries,
-		autoTime:        autoTime,
-		hasTransformers: hasTransformersFlag,
-		mergedCopyFunc:  mergedFn,
+		srcType:        srcType,
+		dstType:        dstType,
+		fastEntries:    fastEntries,
+		slowEntries:    slowEntries,
+		autoTime:       autoTime,
+		mergedCopyFunc: mergedFn,
 	}
 }
 
@@ -2908,13 +2953,13 @@ func (bc *BidiConverter) ConvertModelToPB(model, pbPtr interface{}) error {
 //
 // 【第一层：mergedCopyFunc 快速路径】（最快，完全 unsafe）
 //
-//	条件：canFastPath && mergedCopyFunc != nil && !hasTransformers && slowEntries == 0
+//	条件：canFastPath && mergedCopyFunc != nil
 //	执行：单次 mergedCopyFunc(srcBase, dstBase) 调用，拷贝所有字段后直接返回
 //	性能：接近原生手写代码（1.1-2x 开销）
 //
 // 【第二层：逐字段 copyFunc 快速路径】（次快，unsafe + 少量 reflect）
 //
-//	条件：canFastPath && fastEntries 存在，但 slowEntries 不为空或有 Transformer
+//	条件：canFastPath && fastEntries 存在，但 slowEntries 不为空
 //	执行：mergedCopyFunc 处理所有 fast 字段，然后逐个 slowEntry 用 reflect 处理
 //	性能：比第一层慢约 50-100%，因为需要 FieldByIndex + convertFieldByKind
 //
@@ -2925,7 +2970,8 @@ func (bc *BidiConverter) ConvertModelToPB(model, pbPtr interface{}) error {
 //	      逐个 slowEntry 用 FieldByIndex + convertFieldByKind
 //	性能：约 3-5x 原生（无 unsafe 优化）
 //
-// hasTransformers 标志在 buildFieldCache 时预计算，避免每次调用 transformers.Count()
+// transformer 字段在 buildFieldCache 时生成专用闭包并入 fastEntries，
+// 热路径不再有按字段查询 TransformerRegistry 的开销
 //
 // srcInterface 是 srcVal 对应的原始 interface{}，用于 ifaceDataPtr 路径
 // （当 srcVal 不可寻址时，通过 interface{} 内部布局提取基地址）
@@ -2948,7 +2994,7 @@ func (bc *BidiConverter) convertWithCache(srcVal, dstVal reflect.Value, cache *f
 
 	canFastPath := srcVal.CanAddr() && dstVal.CanAddr()
 
-	if canFastPath && cache.mergedCopyFunc != nil && !cache.hasTransformers {
+	if canFastPath && cache.mergedCopyFunc != nil {
 		srcBase := unsafe.Pointer(srcVal.UnsafeAddr())
 		dstBase := unsafe.Pointer(dstVal.UnsafeAddr())
 		cache.mergedCopyFunc(srcBase, dstBase)
@@ -2973,6 +3019,9 @@ func (bc *BidiConverter) convertWithCache(srcVal, dstVal reflect.Value, cache *f
 			dstField := dstVal.FieldByIndex(entry.dstIndex)
 			if !srcField.IsValid() || !dstField.IsValid() || !dstField.CanSet() {
 				continue
+			}
+			if entry.transformFn != nil {
+				srcField = reflect.ValueOf(entry.transformFn(srcField.Interface()))
 			}
 			if err := convertFieldByKind(srcField, dstField, entry); err != nil {
 				return NewConversionError("字段 %s 转换失败: %v", entry.srcName, err)
