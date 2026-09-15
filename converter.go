@@ -68,6 +68,8 @@ import (
 	"google.golang.org/protobuf/types/known/structpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 	"google.golang.org/protobuf/types/known/wrapperspb"
+
+	"github.com/kamalyes/go-toolbox/pkg/syncx"
 )
 
 // isProtoMessage 检查类型是否为 protobuf 生成的消息类型
@@ -185,7 +187,8 @@ type structFieldTypePair [2]reflect.Type
 
 // globalStructFieldCache 全局嵌套结构体字段缓存
 // 避免每次嵌套转换时重复构建字段映射，提升性能
-var globalStructFieldCache sync.Map
+// 泛型 typed map 免去 interface 装箱与类型断言
+var globalStructFieldCache syncx.Map[structFieldTypePair, *structFieldCache]
 
 // sliceHeader 替代 sliceHeader，使用 unsafe.Pointer 避免 go vet 警告
 // sliceHeader.Data 是 uintptr 类型，转换为 unsafe.Pointer 会触发 vet 警告
@@ -1095,7 +1098,7 @@ func makeStructPtrCopyFunc(srcType, dstType reflect.Type, srcOffset, dstOffset u
 		globalStructFieldCache.Store(structFieldTypePair{srcElemType, dstElemType}, subCache)
 	}
 
-	sc := subCache.(*structFieldCache)
+	sc := subCache
 	fastFns := make([]fieldCopyFunc, len(sc.fastEntries))
 	for i := range sc.fastEntries {
 		fastFns[i] = sc.fastEntries[i].copyFunc
@@ -1147,7 +1150,7 @@ func makeStructCopyFunc(srcType, dstType reflect.Type, srcOffset, dstOffset uint
 		globalStructFieldCache.Store(structFieldTypePair{srcType, dstType}, subCache)
 	}
 
-	sc := subCache.(*structFieldCache)
+	sc := subCache
 	fastFns := make([]fieldCopyFunc, len(sc.fastEntries))
 	for i := range sc.fastEntries {
 		fastFns[i] = sc.fastEntries[i].copyFunc
@@ -1278,7 +1281,7 @@ func makeSliceCopyFunc(srcType, dstType reflect.Type, srcOffset, dstOffset uintp
 			subCache = buildStructFieldCache(srcInnerType, dstInnerType, true)
 			globalStructFieldCache.Store(structFieldTypePair{srcInnerType, dstInnerType}, subCache)
 		}
-		sc := subCache.(*structFieldCache)
+		sc := subCache
 		fastFns := make([]fieldCopyFunc, len(sc.fastEntries))
 		for i := range sc.fastEntries {
 			fastFns[i] = sc.fastEntries[i].copyFunc
@@ -1365,7 +1368,7 @@ func makeSliceCopyFunc(srcType, dstType reflect.Type, srcOffset, dstOffset uintp
 			subCache = buildStructFieldCache(srcElemType, dstElemType, true)
 			globalStructFieldCache.Store(structFieldTypePair{srcElemType, dstElemType}, subCache)
 		}
-		sc := subCache.(*structFieldCache)
+		sc := subCache
 		fastFns := make([]fieldCopyFunc, len(sc.fastEntries))
 		for i := range sc.fastEntries {
 			fastFns[i] = sc.fastEntries[i].copyFunc
@@ -1554,7 +1557,7 @@ func makeMapCopyFunc(srcType, dstType reflect.Type, srcOffset, dstOffset uintptr
 			subCache = buildStructFieldCache(srcValType, dstValType, true)
 			globalStructFieldCache.Store(structFieldTypePair{srcValType, dstValType}, subCache)
 		}
-		sc := subCache.(*structFieldCache)
+		sc := subCache
 		fastFns := make([]fieldCopyFunc, len(sc.fastEntries))
 		for i := range sc.fastEntries {
 			fastFns[i] = sc.fastEntries[i].copyFunc
@@ -2019,7 +2022,7 @@ func makeToPtrCopyFunc(srcType, dstType reflect.Type, srcOffset, dstOffset uintp
 			subCache = buildStructFieldCache(srcType, elemType, true)
 			globalStructFieldCache.Store(structFieldTypePair{srcType, elemType}, subCache)
 		}
-		sc := subCache.(*structFieldCache)
+		sc := subCache
 		fastFns := make([]fieldCopyFunc, len(sc.fastEntries))
 		for i := range sc.fastEntries {
 			fastFns[i] = sc.fastEntries[i].copyFunc
@@ -2081,7 +2084,7 @@ func makeFromPtrCopyFunc(srcType, dstType reflect.Type, srcOffset, dstOffset uin
 			subCache = buildStructFieldCache(elemType, dstType, true)
 			globalStructFieldCache.Store(structFieldTypePair{elemType, dstType}, subCache)
 		}
-		sc := subCache.(*structFieldCache)
+		sc := subCache
 		fastFns := make([]fieldCopyFunc, len(sc.fastEntries))
 		for i := range sc.fastEntries {
 			fastFns[i] = sc.fastEntries[i].copyFunc
@@ -2710,12 +2713,12 @@ type BidiConverter struct {
 	modelToPBCache *fieldCache
 	pbToModelPtr   atomic.Pointer[fieldCache]
 	modelToPBPtr   atomic.Pointer[fieldCache]
-	structCache    map[structFieldTypePair]*structFieldCache
 	mu             sync.RWMutex
 	gen            atomic.Uint64 // 缓存代数，invalidateCache 时递增，热路径条目据此感知失效
 }
 
 // NewBidiConverter 创建双向转换器
+// FieldMapping 惰性初始化：无映射配置时不分配 map
 func NewBidiConverter(pbType, modelType interface{}, opts ...Option) *BidiConverter {
 	pbReflectType := reflect.TypeOf(pbType)
 	modelReflectType := reflect.TypeOf(modelType)
@@ -2731,7 +2734,6 @@ func NewBidiConverter(pbType, modelType interface{}, opts ...Option) *BidiConver
 		modelType:    modelReflectType,
 		options:      options,
 		transformers: NewTransformerRegistry(),
-		structCache:  make(map[structFieldTypePair]*structFieldCache),
 	}
 }
 
@@ -2744,15 +2746,16 @@ func (bc *BidiConverter) WithAutoTimeConversion(enabled bool) *BidiConverter {
 
 // WithFieldMapping 设置字段映射
 func (bc *BidiConverter) WithFieldMapping(modelField, pbField string) *BidiConverter {
-	bc.options.FieldMapping[modelField] = pbField
+	ensureFieldMapping(bc.options)[modelField] = pbField
 	bc.invalidateCache()
 	return bc
 }
 
 // WithFieldMappings 批量设置字段映射
 func (bc *BidiConverter) WithFieldMappings(mappings map[string]string) *BidiConverter {
+	fieldMapping := ensureFieldMapping(bc.options)
 	for k, v := range mappings {
-		bc.options.FieldMapping[k] = v
+		fieldMapping[k] = v
 	}
 	bc.invalidateCache()
 	return bc
@@ -3735,7 +3738,7 @@ func convertStruct(srcField, dstField reflect.Value) error {
 
 	subCache, cached := globalStructFieldCache.Load(structFieldTypePair{srcType, dstType})
 	if cached {
-		sc := subCache.(*structFieldCache)
+		sc := subCache
 		if srcField.CanAddr() && dstField.CanAddr() {
 			applyStructFieldCacheReflect(srcField, dstField, sc)
 			return nil
@@ -3757,7 +3760,7 @@ func convertStruct(srcField, dstField reflect.Value) error {
 	if !cached {
 		subCache = buildStructFieldCache(srcType, dstType, true)
 		globalStructFieldCache.Store(structFieldTypePair{srcType, dstType}, subCache)
-		return convertStructWithCache(srcField, dstField, subCache.(*structFieldCache))
+		return convertStructWithCache(srcField, dstField, subCache)
 	}
 
 	return convertStructFields(srcField, dstField)
@@ -3801,7 +3804,7 @@ func convertStructPtr(srcField, dstField reflect.Value) error {
 		subCache = buildStructFieldCache(srcElemType, dstElemType, true)
 		globalStructFieldCache.Store(structFieldTypePair{srcElemType, dstElemType}, subCache)
 	}
-	sc := subCache.(*structFieldCache)
+	sc := subCache
 
 	srcElem := srcField.Elem()
 	dstPtr := reflect.New(dstElemType)

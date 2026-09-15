@@ -17,8 +17,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"unsafe"
-
-	"github.com/kamalyes/go-toolbox/pkg/types"
 )
 
 // typePair 类型对，用于缓存 key
@@ -230,10 +228,14 @@ func SafeToPBs[M any, P any](models []M) ([]*P, *BatchResult) {
 		}
 		cache := c.modelToPBFieldCache()
 		pureFast := cache.mergedCopyFunc != nil && len(cache.slowEntries) == 0
+		// 切片数据指针按元素大小步进，避免逐元素 reflect.ValueOf 构造
+		base := unsafe.SliceData(models)
+		elemSize := unsafe.Sizeof(*base)
 		for i := range models {
 			item := BatchItem{Index: i}
-			v := reflect.ValueOf(models[i])
-			if v.IsNil() {
+			// 元素为指针类型，槽位数据即元素指针值
+			srcPtr := *(*unsafe.Pointer)(addPtr(unsafe.Pointer(base), uintptr(i)*elemSize))
+			if srcPtr == nil {
 				item.Success = false
 				item.Error = NewConversionError("元素 %d: 输入为 nil", i)
 				result.FailureCount++
@@ -243,9 +245,9 @@ func SafeToPBs[M any, P any](models []M) ([]*P, *BatchResult) {
 			p := &values[i]
 			var err error
 			if pureFast {
-				cache.mergedCopyFunc(unsafe.Pointer(v.Pointer()), unsafe.Pointer(p))
+				cache.mergedCopyFunc(srcPtr, unsafe.Pointer(p))
 			} else {
-				err = c.convertModelToPBPtrCached(unsafe.Pointer(v.Pointer()), unsafe.Pointer(p), cache)
+				err = c.convertModelToPBPtrCached(srcPtr, unsafe.Pointer(p), cache)
 			}
 			if err != nil {
 				item.Success = false
@@ -342,72 +344,34 @@ func ConverterFor[M any, P any]() *BidiConverter {
 // PBToUpdates 将 PB 消息转换为 map[string]interface{}
 // 遍历 proto 字段，使用 protobuf json tag 名作为 key（snake_case）
 // 自动跳过零值、protobuf 内部字段，自动解包 wrapper 类型
+// 字段 key 与偏移按类型缓存于更新计划，热路径零 tag 解析
 func PBToUpdates[P any](pb *P) map[string]interface{} {
 	if pb == nil {
 		return map[string]interface{}{}
 	}
-
-	v := reflect.ValueOf(pb).Elem()
-
-	t := v.Type()
-	builder := NewUpdates()
-
-	for i := 0; i < v.NumField(); i++ {
-		fieldVal := v.Field(i)
-		fieldType := t.Field(i)
-
-		if !fieldVal.CanInterface() {
-			continue
-		}
-
-		key := types.ResolvePBKey(fieldType)
-		if key == "" || key == "-" {
-			continue
-		}
-
-		iface := fieldVal.Interface()
-		if isEmptyUpdateValue(iface) {
-			continue
-		}
-
-		builder.Set(key, types.UnwrapPBValue(iface))
-	}
-
-	return builder.Build()
+	return buildUpdatesFromPlan(getUpdatesPlan[P](false), unsafe.Pointer(pb))
 }
 
 // ModelToUpdates 将 Model 结构体转换为 map[string]interface{}
 // 使用 gorm column tag 或 json tag 作为 key，跳过零值字段和不可导出字段
+// 字段 key 与偏移按类型缓存于更新计划，热路径零 tag 解析
 func ModelToUpdates[M any](m *M) map[string]interface{} {
 	if m == nil {
 		return map[string]interface{}{}
 	}
+	return buildUpdatesFromPlan(getUpdatesPlan[M](true), unsafe.Pointer(m))
+}
 
-	v := reflect.ValueOf(m).Elem()
-
-	t := v.Type()
-	builder := NewUpdates()
-
-	for i := 0; i < v.NumField(); i++ {
-		fieldVal := v.Field(i)
-		fieldType := t.Field(i)
-
-		if !fieldVal.CanInterface() {
+// buildUpdatesFromPlan 按预构建计划输出更新字段
+// 空值跳过语义与旧反射实现一致：nil 指针、空字符串、零值、空集合不输出
+func buildUpdatesFromPlan(plan *updatesPlan, base unsafe.Pointer) map[string]interface{} {
+	updates := make(map[string]interface{}, len(plan.fields))
+	for i := range plan.fields {
+		entry := &plan.fields[i]
+		if entry.empty(base) {
 			continue
 		}
-
-		key := types.ResolveModelKey(fieldType)
-		if key == "-" {
-			continue
-		}
-
-		iface := fieldVal.Interface()
-		if isEmptyUpdateValue(iface) {
-			continue
-		}
-
-		builder.Set(key, types.UnwrapModelValue(iface))
+		updates[entry.key] = entry.emit(base)
 	}
-
-	return builder.Build()
+	return updates
 }

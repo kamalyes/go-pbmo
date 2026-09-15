@@ -31,10 +31,10 @@ type Options struct {
 }
 
 // DefaultOptions 默认配置
+// FieldMapping 惰性初始化：无映射配置时不分配 map
 func DefaultOptions() *Options {
 	return &Options{
 		AutoTimeConversion: true,
-		FieldMapping:       make(map[string]string),
 		TagMappingEnabled:  true,
 		TagName:            "pbmo",
 		ValidationEnabled:  false,
@@ -44,6 +44,14 @@ func DefaultOptions() *Options {
 		BatchSize:          100,
 		Timeout:            30 * time.Second,
 	}
+}
+
+// ensureFieldMapping 惰性初始化字段映射 map
+func ensureFieldMapping(o *Options) map[string]string {
+	if o.FieldMapping == nil {
+		o.FieldMapping = make(map[string]string)
+	}
+	return o.FieldMapping
 }
 
 // ApplyOptions 应用选项到默认配置
@@ -65,15 +73,16 @@ func WithAutoTimeConversion(enabled bool) Option {
 // WithFieldMapping 设置字段映射
 func WithFieldMapping(modelField, pbField string) Option {
 	return func(o *Options) {
-		o.FieldMapping[modelField] = pbField
+		ensureFieldMapping(o)[modelField] = pbField
 	}
 }
 
 // WithFieldMappings 批量设置字段映射
 func WithFieldMappings(mappings map[string]string) Option {
 	return func(o *Options) {
+		fieldMapping := ensureFieldMapping(o)
 		for k, v := range mappings {
-			o.FieldMapping[k] = v
+			fieldMapping[k] = v
 		}
 	}
 }

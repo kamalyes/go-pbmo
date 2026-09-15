@@ -22,7 +22,7 @@ func TestDefaultOptions(t *testing.T) {
 	opts := DefaultOptions()
 
 	assert.True(t, opts.AutoTimeConversion, "默认应启用自动时间转换")
-	assert.NotNil(t, opts.FieldMapping, "字段映射不应为nil")
+	assert.Nil(t, opts.FieldMapping, "字段映射应惰性初始化，默认不分配")
 	assert.Empty(t, opts.FieldMapping, "默认字段映射应为空")
 	assert.True(t, opts.TagMappingEnabled, "默认应启用tag映射")
 	assert.Equal(t, "pbmo", opts.TagName, "默认tag名应为pbmo")

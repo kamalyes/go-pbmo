@@ -27,12 +27,8 @@ func (bc *BidiConverter) convertPBToModelPtrCached(pbPtr, modelPtr unsafe.Pointe
 			return nil
 		}
 	} else if len(cache.fastEntries) > 0 {
-		if cache.mergedCopyFunc != nil {
-			cache.mergedCopyFunc(pbPtr, modelPtr)
-		} else {
-			for i := range cache.fastEntries {
-				cache.fastEntries[i].copyFunc(pbPtr, modelPtr)
-			}
+		for i := range cache.fastEntries {
+			cache.fastEntries[i].copyFunc(pbPtr, modelPtr)
 		}
 	}
 	if len(cache.slowEntries) == 0 {
@@ -65,12 +61,8 @@ func (bc *BidiConverter) convertModelToPBPtrCached(modelPtr, pbPtr unsafe.Pointe
 			return nil
 		}
 	} else if len(cache.fastEntries) > 0 {
-		if cache.mergedCopyFunc != nil {
-			cache.mergedCopyFunc(modelPtr, pbPtr)
-		} else {
-			for i := range cache.fastEntries {
-				cache.fastEntries[i].copyFunc(modelPtr, pbPtr)
-			}
+		for i := range cache.fastEntries {
+			cache.fastEntries[i].copyFunc(modelPtr, pbPtr)
 		}
 	}
 	if len(cache.slowEntries) == 0 {
@@ -121,12 +113,8 @@ func (bc *BidiConverter) convertPBToModelCached(pbVal, modelVal reflect.Value, c
 	} else if canFastPath && len(cache.fastEntries) > 0 {
 		srcBase := unsafe.Pointer(pbVal.UnsafeAddr())
 		dstBase := unsafe.Pointer(modelVal.UnsafeAddr())
-		if cache.mergedCopyFunc != nil {
-			cache.mergedCopyFunc(srcBase, dstBase)
-		} else {
-			for i := range cache.fastEntries {
-				cache.fastEntries[i].copyFunc(srcBase, dstBase)
-			}
+		for i := range cache.fastEntries {
+			cache.fastEntries[i].copyFunc(srcBase, dstBase)
 		}
 	} else if len(cache.fastEntries) > 0 {
 		for i := range cache.fastEntries {
@@ -209,12 +197,8 @@ func (bc *BidiConverter) convertModelToPBCached(modelVal, pbVal reflect.Value, c
 	} else if canFastPath && len(cache.fastEntries) > 0 {
 		srcBase := unsafe.Pointer(modelVal.UnsafeAddr())
 		dstBase := unsafe.Pointer(pbVal.UnsafeAddr())
-		if cache.mergedCopyFunc != nil {
-			cache.mergedCopyFunc(srcBase, dstBase)
-		} else {
-			for i := range cache.fastEntries {
-				cache.fastEntries[i].copyFunc(srcBase, dstBase)
-			}
+		for i := range cache.fastEntries {
+			cache.fastEntries[i].copyFunc(srcBase, dstBase)
 		}
 	} else if len(cache.fastEntries) > 0 {
 		for i := range cache.fastEntries {
