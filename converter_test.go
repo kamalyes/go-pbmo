@@ -477,7 +477,7 @@ func TestConvertStructToMap_PBToModel(t *testing.T) {
 	}
 
 	var model TestMapStructModel
-	err = bc.ConvertPBToModel(pb, &model)
+	err = bc.ConvertPBToModel(&pb, &model)
 	assert.NoError(t, err)
 	assert.Equal(t, "prod", model.Name)
 	assert.NotNil(t, model.Params)
@@ -513,7 +513,7 @@ func TestConvertMapStruct_NilValues(t *testing.T) {
 	t.Run("nil_struct_to_map", func(t *testing.T) {
 		pb := TestMapStructPB{Name: "empty"}
 		var model TestMapStructModel
-		err := bc.ConvertPBToModel(pb, &model)
+		err := bc.ConvertPBToModel(&pb, &model)
 		assert.NoError(t, err)
 		assert.Equal(t, "empty", model.Name)
 		assert.Nil(t, model.Params)
@@ -542,7 +542,7 @@ func TestConvertMapStruct_EmptyMap(t *testing.T) {
 		assert.NoError(t, err)
 		pb := TestMapStructPB{Name: "test", Params: st}
 		var model TestMapStructModel
-		err = bc.ConvertPBToModel(pb, &model)
+		err = bc.ConvertPBToModel(&pb, &model)
 		assert.NoError(t, err)
 		assert.NotNil(t, model.Params)
 		assert.Equal(t, 0, len(model.Params))
@@ -571,7 +571,7 @@ func TestConvertMapStruct_RoundTrip(t *testing.T) {
 	assert.NoError(t, err)
 
 	var roundTrip TestMapStructModel
-	err = bc.ConvertPBToModel(pb, &roundTrip)
+	err = bc.ConvertPBToModel(&pb, &roundTrip)
 	assert.NoError(t, err)
 
 	assert.Equal(t, original.Name, roundTrip.Name)
@@ -888,7 +888,7 @@ func TestConvertMapStruct_StructToMap_Reverse(t *testing.T) {
 
 	pb := TestMapStructPB{Name: "reverse", Params: st}
 	var model TestMapStructModel
-	err = bc.ConvertPBToModel(pb, &model)
+	err = bc.ConvertPBToModel(&pb, &model)
 	assert.NoError(t, err)
 	assert.Equal(t, "reverse", model.Name)
 	assert.NotNil(t, model.Params)
