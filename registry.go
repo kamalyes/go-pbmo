@@ -21,8 +21,9 @@ import (
 
 // Registry 转换器注册中心
 // 使用 syncx.Map 统一管理 PB ↔ Model 转换器，天然并发安全
+// key 为类型对结构体，热路径零字符串分配
 type Registry struct {
-	converters *syncx.Map[string, *BidiConverter]
+	converters *syncx.Map[typePair, *BidiConverter]
 }
 
 // 全局注册中心实例
@@ -31,7 +32,7 @@ var globalRegistry = NewRegistry()
 // NewRegistry 创建转换器注册中心
 func NewRegistry() *Registry {
 	return &Registry{
-		converters: syncx.NewMap[string, *BidiConverter](),
+		converters: syncx.NewMap[typePair, *BidiConverter](),
 	}
 }
 
@@ -40,16 +41,21 @@ func GlobalRegistry() *Registry {
 	return globalRegistry
 }
 
-// registryKey 生成注册中心的 key
-func registryKey(pbType, modelType reflect.Type) string {
-	return fmt.Sprintf("%s:%s", GetTypeName(DereferenceType(pbType)), GetTypeName(DereferenceType(modelType)))
+// registryKey 生成注册中心 key（类型对解引用指针后组合）
+func registryKey(pbType, modelType reflect.Type) typePair {
+	return typePair{DereferenceType(pbType), DereferenceType(modelType)}
+}
+
+// registryKeyString 生成用于错误信息与 Keys 的可读 key，仅错误路径调用
+func registryKeyString(pbType, modelType reflect.Type) string {
+	return fmt.Sprintf("%s:%s", GetTypeName(pbType), GetTypeName(modelType))
 }
 
 // Register 注册转换器
 func (r *Registry) Register(converter *BidiConverter) error {
 	key := registryKey(converter.GetPBType(), converter.GetModelType())
 	if _, exists := r.converters.Load(key); exists {
-		return fmt.Errorf("%w: %s", ErrConverterExists, key)
+		return fmt.Errorf("%w: %s", ErrConverterExists, registryKeyString(key[0], key[1]))
 	}
 	r.converters.Store(key, converter)
 	return nil
@@ -67,7 +73,7 @@ func (r *Registry) Lookup(pbType, modelType reflect.Type) (*BidiConverter, error
 	key := registryKey(pbType, modelType)
 	converter, ok := r.converters.Load(key)
 	if !ok {
-		return nil, fmt.Errorf("%w: %s", ErrConverterNotFound, key)
+		return nil, fmt.Errorf("%w: %s", ErrConverterNotFound, registryKeyString(key[0], key[1]))
 	}
 	return converter, nil
 }
@@ -107,35 +113,32 @@ func (r *Registry) Count() int {
 	return r.converters.Size()
 }
 
-// Keys 获取所有已注册的 key
+// Keys 获取所有已注册的可读 key
 func (r *Registry) Keys() []string {
-	return r.converters.Keys()
+	pairs := r.converters.Keys()
+	keys := make([]string, 0, len(pairs))
+	for _, p := range pairs {
+		keys = append(keys, registryKeyString(p[0], p[1]))
+	}
+	return keys
 }
 
 // ConvertPBToModel 通过注册中心执行 PB -> Model 转换
 func (r *Registry) ConvertPBToModel(pb, model interface{}) error {
-	pbType := reflect.TypeOf(pb)
-	modelType := reflect.TypeOf(model)
-	if modelType.Kind() == reflect.Ptr {
-		modelType = modelType.Elem()
-	}
-	converter, ok := r.converters.Load(registryKey(pbType, modelType))
+	key := registryKey(reflect.TypeOf(pb), reflect.TypeOf(model))
+	converter, ok := r.converters.Load(key)
 	if !ok {
-		return fmt.Errorf("%w: %s", ErrConverterNotFound, registryKey(pbType, modelType))
+		return fmt.Errorf("%w: %s", ErrConverterNotFound, registryKeyString(key[0], key[1]))
 	}
 	return converter.ConvertPBToModel(pb, model)
 }
 
 // ConvertModelToPB 通过注册中心执行 Model -> PB 转换
 func (r *Registry) ConvertModelToPB(model, pb interface{}) error {
-	modelType := reflect.TypeOf(model)
-	pbType := reflect.TypeOf(pb)
-	if pbType.Kind() == reflect.Ptr {
-		pbType = pbType.Elem()
-	}
-	converter, ok := r.converters.Load(registryKey(pbType, modelType))
+	key := registryKey(reflect.TypeOf(pb), reflect.TypeOf(model))
+	converter, ok := r.converters.Load(key)
 	if !ok {
-		return fmt.Errorf("%w: %s", ErrConverterNotFound, registryKey(pbType, modelType))
+		return fmt.Errorf("%w: %s", ErrConverterNotFound, registryKeyString(key[0], key[1]))
 	}
 	return converter.ConvertModelToPB(model, pb)
 }

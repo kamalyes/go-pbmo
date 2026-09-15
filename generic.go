@@ -24,16 +24,30 @@ import (
 // typePair 类型对，用于缓存 key
 type typePair [2]reflect.Type
 
-// converterCache 转换器缓存，用于存储已注册的转换器
+// converterCache 转换器缓存：typePair -> *BidiConverter
 var converterCache sync.Map
 
-// lastConverter 最近使用的转换器，用于缓存
-var lastConverter atomic.Pointer[cachedConverter]
+// entrySlotCount 热路径缓存槽位数，按 typePair 哈希分片降低多类型对互驱逐
+const entrySlotCount = 8
 
-// cachedConverter 缓存的转换器，包含 key 和转换器实例
+// entrySlot 热路径缓存槽位，按缓存行对齐避免相邻槽位伪共享
+type entrySlot struct {
+	_     [128]byte
+	entry atomic.Pointer[cachedConverter]
+}
+
+// lastEntries 最近使用的转换条目槽组
+var lastEntries [entrySlotCount]entrySlot
+
+// cachedConverter 转换器热路径缓存条目
+// 一次原子读同时取得转换器与双向字段缓存，稳态零分配
+// gen 记录构建时的缓存代数，与转换器当前代数不一致时回源刷新
 type cachedConverter struct {
 	key       typePair
 	converter *BidiConverter
+	gen       uint64
+	pbToModel *fieldCache
+	modelToPB *fieldCache
 }
 
 // typeKey 生成类型对 key
@@ -44,22 +58,48 @@ func typeKey[M any, P any]() typePair {
 	}
 }
 
+// slotIndex 按类型对哈希取槽位
+// reflect.Type 底层为 *rtype 指针，取接口数据字做轻量哈希即可稳定区分类型
+func slotIndex(key typePair) int {
+	h := uintptr(ifaceDataPtr(key[0]))*31 + uintptr(ifaceDataPtr(key[1]))
+	return int(h & (entrySlotCount - 1))
+}
+
+// newCachedConverter 确保字段缓存已构建并生成热路径条目
+func newCachedConverter(key typePair, c *BidiConverter) *cachedConverter {
+	pbToModel, modelToPB := c.fieldCaches()
+	return &cachedConverter{
+		key:       key,
+		converter: c,
+		gen:       c.gen.Load(),
+		pbToModel: pbToModel,
+		modelToPB: modelToPB,
+	}
+}
+
+// getOrInitCachedConverter 获取或初始化热路径缓存条目
+// 命中槽位仅一次原子读；未命中从 converterCache 取转换器后重建条目
+func getOrInitCachedConverter[M any, P any]() *cachedConverter {
+	key := typeKey[M, P]()
+	slot := &lastEntries[slotIndex(key)]
+	if e := slot.entry.Load(); e != nil && e.key == key && e.gen == e.converter.gen.Load() {
+		return e
+	}
+	var c *BidiConverter
+	if v, ok := converterCache.Load(key); ok {
+		c = v.(*BidiConverter)
+	} else {
+		actual, _ := converterCache.LoadOrStore(key, NewBidiConverter(new(P), new(M)).WithAutoTimeConversion(true))
+		c = actual.(*BidiConverter)
+	}
+	e := newCachedConverter(key, c)
+	slot.entry.Store(e)
+	return e
+}
+
 // getOrInitConverter 获取或初始化转换器
 func getOrInitConverter[M any, P any]() *BidiConverter {
-	key := typeKey[M, P]()
-	if cached := lastConverter.Load(); cached != nil && cached.key == key {
-		return cached.converter
-	}
-	if c, ok := converterCache.Load(key); ok {
-		converter := c.(*BidiConverter)
-		lastConverter.Store(&cachedConverter{key: key, converter: converter})
-		return converter
-	}
-	c := NewBidiConverter(new(P), new(M)).WithAutoTimeConversion(true)
-	actual, _ := converterCache.LoadOrStore(key, c)
-	converter := actual.(*BidiConverter)
-	lastConverter.Store(&cachedConverter{key: key, converter: converter})
-	return converter
+	return getOrInitCachedConverter[M, P]().converter
 }
 
 // Register[M, P] 注册 Model-PB 转换对（使用默认配置）
@@ -72,7 +112,7 @@ func RegisterWith[M any, P any](opts ...Option) *BidiConverter {
 	key := typeKey[M, P]()
 	c := NewBidiConverter(new(P), new(M), opts...)
 	converterCache.Store(key, c)
-	lastConverter.Store(&cachedConverter{key: key, converter: c})
+	lastEntries[slotIndex(key)].entry.Store(newCachedConverter(key, c))
 	return c
 }
 
@@ -81,14 +121,14 @@ func ToPB[M any, P any](m *M) (*P, error) {
 	if m == nil {
 		return nil, nil
 	}
+	e := getOrInitCachedConverter[M, P]()
+	cache := e.modelToPB
 	info := new(P)
-	c := getOrInitConverter[M, P]()
-	cache := c.modelToPBFieldCache()
 	if cache.mergedCopyFunc != nil && !cache.hasTransformers && len(cache.slowEntries) == 0 {
 		cache.mergedCopyFunc(unsafe.Pointer(m), unsafe.Pointer(info))
 		return info, nil
 	}
-	return info, c.convertModelToPBPtrCached(unsafe.Pointer(m), unsafe.Pointer(info), cache)
+	return info, e.converter.convertModelToPBPtrCached(unsafe.Pointer(m), unsafe.Pointer(info), cache)
 }
 
 // FromPB 将 PB 消息转换为 Model，nil 输入返回 nil
@@ -96,14 +136,14 @@ func FromPB[P any, M any](pb *P) (*M, error) {
 	if pb == nil {
 		return nil, nil
 	}
+	e := getOrInitCachedConverter[M, P]()
+	cache := e.pbToModel
 	model := new(M)
-	c := getOrInitConverter[M, P]()
-	cache := c.pbToModelFieldCache()
 	if cache.mergedCopyFunc != nil && !cache.hasTransformers && len(cache.slowEntries) == 0 {
 		cache.mergedCopyFunc(unsafe.Pointer(pb), unsafe.Pointer(model))
 		return model, nil
 	}
-	return model, c.convertPBToModelPtrCached(unsafe.Pointer(pb), unsafe.Pointer(model), cache)
+	return model, e.converter.convertPBToModelPtrCached(unsafe.Pointer(pb), unsafe.Pointer(model), cache)
 }
 
 // ToPBs 批量将 Model 指针切片转换为 PB 切片
@@ -112,9 +152,9 @@ func ToPBs[M any, P any](models []*M) ([]*P, error) {
 	if len(models) == 0 {
 		return pbs, nil
 	}
+	e := getOrInitCachedConverter[M, P]()
+	cache := e.modelToPB
 	values := make([]P, len(models))
-	c := getOrInitConverter[M, P]()
-	cache := c.modelToPBFieldCache()
 	if cache.mergedCopyFunc != nil && !cache.hasTransformers && len(cache.slowEntries) == 0 {
 		for i, m := range models {
 			p := &values[i]
@@ -127,7 +167,7 @@ func ToPBs[M any, P any](models []*M) ([]*P, error) {
 	}
 	for i, m := range models {
 		p := &values[i]
-		if err := c.convertModelToPBPtrCached(unsafe.Pointer(m), unsafe.Pointer(p), cache); err != nil {
+		if err := e.converter.convertModelToPBPtrCached(unsafe.Pointer(m), unsafe.Pointer(p), cache); err != nil {
 			return nil, NewBatchError("元素 %d: %v", i, err)
 		}
 		pbs[i] = p
@@ -142,9 +182,9 @@ func FromPBs[P any, M any](pbs []*P) ([]*M, error) {
 	if len(pbs) == 0 {
 		return models, nil
 	}
+	e := getOrInitCachedConverter[M, P]()
+	cache := e.pbToModel
 	values := make([]M, len(pbs))
-	c := getOrInitConverter[M, P]()
-	cache := c.pbToModelFieldCache()
 	if cache.mergedCopyFunc != nil && !cache.hasTransformers && len(cache.slowEntries) == 0 {
 		for i, pb := range pbs {
 			m := &values[i]
@@ -161,7 +201,7 @@ func FromPBs[P any, M any](pbs []*P) ([]*M, error) {
 			models[i] = m
 			continue
 		}
-		if err := c.convertPBToModelPtrCached(unsafe.Pointer(pb), unsafe.Pointer(m), cache); err != nil {
+		if err := e.converter.convertPBToModelPtrCached(unsafe.Pointer(pb), unsafe.Pointer(m), cache); err != nil {
 			return nil, NewBatchError("元素 %d: %v", i, err)
 		}
 		models[i] = m

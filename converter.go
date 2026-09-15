@@ -2667,6 +2667,7 @@ type BidiConverter struct {
 	modelToPBPtr   atomic.Pointer[fieldCache]
 	structCache    map[structFieldTypePair]*structFieldCache
 	mu             sync.RWMutex
+	gen            atomic.Uint64 // 缓存代数，invalidateCache 时递增，热路径条目据此感知失效
 }
 
 // NewBidiConverter 创建双向转换器
@@ -2795,7 +2796,7 @@ func (bc *BidiConverter) GetTransformers() *TransformerRegistry {
 	return bc.transformers
 }
 
-// invalidateCache 清空缓存，下次调用时重建
+// invalidateCache 清空缓存并递增代数，热路径条目据此感知失效
 func (bc *BidiConverter) invalidateCache() {
 	bc.mu.Lock()
 	bc.pbToModelCache = nil
@@ -2803,16 +2804,21 @@ func (bc *BidiConverter) invalidateCache() {
 	bc.pbToModelPtr.Store(nil)
 	bc.modelToPBPtr.Store(nil)
 	bc.mu.Unlock()
+	bc.gen.Add(1)
 }
 
-// ensureFieldCache 确保字段缓存已构建
+// fieldCaches 获取双向字段缓存，均已就绪时零加锁返回
 func (bc *BidiConverter) fieldCaches() (*fieldCache, *fieldCache) {
 	pbToModel := bc.pbToModelPtr.Load()
 	modelToPB := bc.modelToPBPtr.Load()
 	if pbToModel != nil && modelToPB != nil {
 		return pbToModel, modelToPB
 	}
+	return bc.buildFieldCaches()
+}
 
+// buildFieldCaches 加锁构建并发布双向字段缓存
+func (bc *BidiConverter) buildFieldCaches() (*fieldCache, *fieldCache) {
 	bc.mu.Lock()
 	defer bc.mu.Unlock()
 	if bc.pbToModelCache == nil {
@@ -2826,14 +2832,22 @@ func (bc *BidiConverter) fieldCaches() (*fieldCache, *fieldCache) {
 	return bc.pbToModelCache, bc.modelToPBCache
 }
 
+// pbToModelFieldCache 获取 PB→Model 字段缓存，稳态仅一次原子读
 func (bc *BidiConverter) pbToModelFieldCache() *fieldCache {
-	cache, _ := bc.fieldCaches()
-	return cache
+	if c := bc.pbToModelPtr.Load(); c != nil {
+		return c
+	}
+	c, _ := bc.buildFieldCaches()
+	return c
 }
 
+// modelToPBFieldCache 获取 Model→PB 字段缓存，稳态仅一次原子读
 func (bc *BidiConverter) modelToPBFieldCache() *fieldCache {
-	_, cache := bc.fieldCaches()
-	return cache
+	if c := bc.modelToPBPtr.Load(); c != nil {
+		return c
+	}
+	_, c := bc.buildFieldCaches()
+	return c
 }
 
 func (bc *BidiConverter) ensureFieldCache() {
