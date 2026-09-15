@@ -265,6 +265,21 @@ func isEmptyUpdateValue(value interface{}) bool {
 	return validate.IsEmptyValue(reflect.ValueOf(value))
 }
 
+// isEmptyUpdateString 更新字典字符串空值判断
+// 语义与 validate.IsBlankString || validate.IfNullOrUndefined 一致
+// 空串、全空白、以及 trim 后忽略大小写等于 null/undefined 均视为空
+// 内联实现避免热路径三个跨包调用与重复 TrimSpace，长度预筛与 EqualFold 严格等价
 func isEmptyUpdateString(value string) bool {
-	return validate.IsBlankString(value) || validate.IfNullOrUndefined(value)
+	for i := 0; i < len(value); i++ {
+		c := value[i]
+		if c != ' ' && c != '\t' && c != '\n' && c != '\r' {
+			// 存在非空白字符，仅当 trim 后与 null/undefined 忽略大小写相等才为空
+			t := strings.TrimSpace(value)
+			if len(t) != 4 && len(t) != 9 {
+				return false
+			}
+			return strings.EqualFold(t, "null") || strings.EqualFold(t, "undefined")
+		}
+	}
+	return true
 }

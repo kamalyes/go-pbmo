@@ -220,6 +220,26 @@ func ifaceDataPtr(iface interface{}) unsafe.Pointer {
 	return h.Data
 }
 
+// ifaceTypeWord 提取指定类型装箱为接口后的类型词，仅构建期调用一次缓存
+func ifaceTypeWord(t reflect.Type) unsafe.Pointer {
+	var probe interface{} = reflect.Zero(t).Interface()
+	type ifaceHeader struct {
+		Type unsafe.Pointer
+		_    unsafe.Pointer
+	}
+	return (*ifaceHeader)(unsafe.Pointer(&probe)).Type
+}
+
+// makeIface 以缓存的类型词与数据指针直接构造接口值
+// 数据指针必须非空，装箱词布局与 runtime eface 一致
+func makeIface(typ, data unsafe.Pointer) interface{} {
+	type ifaceHeader struct {
+		Type unsafe.Pointer
+		Data unsafe.Pointer
+	}
+	return *(*interface{})(unsafe.Pointer(&ifaceHeader{typ, data}))
+}
+
 // applyFastPath 应用快速路径的 unsafe 拷贝
 func (bc *BidiConverter) applyFastPath(cache *fieldCache, srcBase, dstBase unsafe.Pointer, srcVal, dstVal reflect.Value) error {
 	if cache.mergedCopyFunc != nil {

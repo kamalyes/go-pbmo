@@ -25,8 +25,9 @@ type typePair [2]reflect.Type
 // converterCache 转换器缓存：typePair -> *BidiConverter
 var converterCache sync.Map
 
-// entrySlotCount 热路径缓存槽位数，按 typePair 哈希分片降低多类型对互驱逐
-const entrySlotCount = 8
+// entrySlotCount 热路径缓存槽位数，按类型对哈希分片降低多类型对互驱逐
+// 32 槽（4KB 静态）覆盖服务同时活跃的几十个类型对规模，撞槽时仅一次 converterCache 回源
+const entrySlotCount = 32
 
 // entrySlot 热路径缓存槽位，按缓存行对齐避免相邻槽位伪共享
 type entrySlot struct {
@@ -64,6 +65,14 @@ func derefType(t reflect.Type) reflect.Type {
 	return t
 }
 
+// slotIndexOf 计算类型对槽位下标
+// rtype 指针低位因内存对齐恒零，移位后取有效位参与散列
+// 黄金比例乘数将乘积高低位充分混合，避免全部类型对聚在同一槽位
+func slotIndexOf(mk, pk uintptr) int {
+	h := ((mk >> 4) * 0x9E3779B97F4A7C15) ^ ((pk >> 4) * 0xC2B2AE3D27D4EB4F)
+	return int((h ^ (h >> 29)) & (entrySlotCount - 1))
+}
+
 // fastKeyOf 提取类型对的 rtype 指针、规范 typePair 与槽位下标
 // 哈希与 key 构造共用一次接口数据字提取，热路径零多余反射调用
 func fastKeyOf[M any, P any]() (fastKey, typePair, int) {
@@ -71,7 +80,7 @@ func fastKeyOf[M any, P any]() (fastKey, typePair, int) {
 	pt := derefType(reflect.TypeFor[P]())
 	mk := uintptr(ifaceDataPtr(mt))
 	pk := uintptr(ifaceDataPtr(pt))
-	return fastKey{mk, pk}, typePair{mt, pt}, int((mk*31 + pk) & (entrySlotCount - 1))
+	return fastKey{mk, pk}, typePair{mt, pt}, slotIndexOf(mk, pk)
 }
 
 // newCachedConverter 确保字段缓存已构建并生成热路径条目
@@ -112,7 +121,7 @@ func getOrInitCachedConverter[M any, P any]() *cachedConverter {
 func lookupCachedConverter[P any](modelType reflect.Type) *cachedConverter {
 	pt := reflect.TypeFor[P]()
 	key := fastKey{uintptr(ifaceDataPtr(modelType)), uintptr(ifaceDataPtr(pt))}
-	idx := int((key.model*31 + key.pb) & (entrySlotCount - 1))
+	idx := slotIndexOf(key.model, key.pb)
 	slot := &lastEntries[idx]
 	if e := slot.entry.Load(); e != nil && e.key == key && e.gen == e.converter.gen.Load() {
 		return e

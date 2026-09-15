@@ -108,14 +108,22 @@ func buildUpdatesPlan(t reflect.Type, isModel bool) *updatesPlan {
 	return plan
 }
 
+// maxUpdateCheckDepth 单字段 struct 下钻深度上限，防自引用类型递归爆栈
+const maxUpdateCheckDepth = 8
+
 // makeUpdateEmptyCheck 按字段类型生成特化空值判断
-// 语义与 isEmptyUpdateValue 一致：nil 指针、空字符串、零值、空集合、零值时间视为空
 func makeUpdateEmptyCheck(ft reflect.Type, off uintptr) func(unsafe.Pointer) bool {
+	return makeUpdateEmptyCheckAt(ft, off, 0)
+}
+
+// makeUpdateEmptyCheckAt 按字段类型生成特化空值判断，depth 记录单字段 struct 下钻层数
+// 语义与 isEmptyUpdateValue 一致：nil 指针、空字符串、零值、空集合、零值时间视为空
+func makeUpdateEmptyCheckAt(ft reflect.Type, off uintptr, depth int) func(unsafe.Pointer) bool {
 	switch ft.Kind() {
 	case reflect.String:
 		return func(base unsafe.Pointer) bool {
 			s := *(*string)(addPtr(base, off))
-			return validate.IsBlankString(s) || validate.IfNullOrUndefined(s)
+			return isEmptyUpdateString(s)
 		}
 	case reflect.Bool:
 		return func(base unsafe.Pointer) bool {
@@ -168,12 +176,18 @@ func makeUpdateEmptyCheck(ft reflect.Type, off uintptr) func(unsafe.Pointer) boo
 				return sv == nil || isEmptyUpdateString(sv.Value)
 			}
 		}
-		elemCheck := makeUpdateDerefEmptyCheck(ft.Elem())
+		elemCheck := makeUpdateDerefEmptyCheck(ft.Elem(), depth)
 		return func(base unsafe.Pointer) bool {
 			p := *(*unsafe.Pointer)(addPtr(base, off))
 			return p == nil || elemCheck(p)
 		}
-	case reflect.Slice, reflect.Map, reflect.Array:
+	case reflect.Slice:
+		// slice 运行时头直读 Len，免去逐次 reflect.NewAt 与 ptrTo 缓存查找
+		return func(base unsafe.Pointer) bool {
+			return (*sliceHeader)(addPtr(base, off)).Len == 0
+		}
+	case reflect.Map, reflect.Array:
+		// map 头依赖 runtime 内部布局不直读，数组恒非空语义与原实现一致
 		return func(base unsafe.Pointer) bool {
 			return reflect.NewAt(ft, addPtr(base, off)).Elem().Len() == 0
 		}
@@ -182,6 +196,13 @@ func makeUpdateEmptyCheck(ft reflect.Type, off uintptr) func(unsafe.Pointer) boo
 			return func(base unsafe.Pointer) bool {
 				tm := *(*time.Time)(addPtr(base, off))
 				return tm.IsZero() || tm.Unix() <= 0
+			}
+		}
+		// 单导出字段 struct 下钻载体字段复用已有特化，语义与 IsZero 全字段零值一致
+		// 如 sqltypes.JSON[T]{Data T} 包装类型，避免 IsZero 的递归反射遍历
+		if depth < maxUpdateCheckDepth && ft.NumField() == 1 {
+			if f := ft.Field(0); f.IsExported() {
+				return makeUpdateEmptyCheckAt(f.Type, off+f.Offset, depth+1)
 			}
 		}
 		return func(base unsafe.Pointer) bool {
@@ -197,24 +218,34 @@ func makeUpdateEmptyCheck(ft reflect.Type, off uintptr) func(unsafe.Pointer) boo
 
 // makeUpdateDerefEmptyCheck 生成对指针已解引用值的空值判断
 // 递归展开多级指针，与 IsEmptyValue 的循环解引用语义一致
-func makeUpdateDerefEmptyCheck(et reflect.Type) func(unsafe.Pointer) bool {
+func makeUpdateDerefEmptyCheck(et reflect.Type, depth int) func(unsafe.Pointer) bool {
 	if et.Kind() == reflect.Ptr {
-		inner := makeUpdateDerefEmptyCheck(et.Elem())
+		inner := makeUpdateDerefEmptyCheck(et.Elem(), depth)
 		return func(p unsafe.Pointer) bool {
 			pp := *(*unsafe.Pointer)(p)
 			return pp == nil || inner(pp)
 		}
 	}
-	return makeUpdateEmptyCheck(et, 0)
+	return makeUpdateEmptyCheckAt(et, 0, depth)
 }
 
 // makeUpdateEmitter 按字段类型生成值输出闭包（装箱 + 解包）
 // PB 侧 wrapper 输出 Value 字段值，Model 侧指针解引用输出底层值
+// 基础类型与 time.Time 直接从偏移读值装箱，避免 reflect.Value 构造开销
 func makeUpdateEmitter(ft reflect.Type, off uintptr, isModel bool) func(unsafe.Pointer) interface{} {
 	if !isModel && ft.Kind() == reflect.Ptr &&
 		ft.Elem().Kind() == reflect.Struct && ft.Elem().PkgPath() == wrapperspbPkgPath {
 		if valueField, ok := ft.Elem().FieldByName("Value"); ok {
 			vt, vo := valueField.Type, valueField.Offset
+			if emit := makeDirectEmitter(vt, 0); emit != nil {
+				return func(base unsafe.Pointer) interface{} {
+					p := *(*unsafe.Pointer)(addPtr(base, off))
+					if p == nil {
+						return nil
+					}
+					return emit(addPtr(p, vo))
+				}
+			}
 			return func(base unsafe.Pointer) interface{} {
 				p := *(*unsafe.Pointer)(addPtr(base, off))
 				if p == nil {
@@ -226,6 +257,16 @@ func makeUpdateEmitter(ft reflect.Type, off uintptr, isModel bool) func(unsafe.P
 	}
 	if isModel && ft.Kind() == reflect.Ptr {
 		et := ft.Elem()
+		if emit := makeDirectEmitter(et, 0); emit != nil {
+			return func(base unsafe.Pointer) interface{} {
+				p := *(*unsafe.Pointer)(addPtr(base, off))
+				if p == nil {
+					// typed nil 保持原值语义，输出装箱后的指针本身
+					return reflect.NewAt(ft, addPtr(base, off)).Elem().Interface()
+				}
+				return emit(p)
+			}
+		}
 		return func(base unsafe.Pointer) interface{} {
 			p := *(*unsafe.Pointer)(addPtr(base, off))
 			if p == nil {
@@ -235,7 +276,102 @@ func makeUpdateEmitter(ft reflect.Type, off uintptr, isModel bool) func(unsafe.P
 			return reflect.NewAt(et, p).Elem().Interface()
 		}
 	}
+	if ft.Kind() == reflect.Ptr {
+		// PB 方向非 wrapper 指针直接输出指针装箱，构建期缓存类型词
+		// 消除逐次 reflect.NewAt 与 packEface 反射链
+		typ := ifaceTypeWord(ft)
+		return func(base unsafe.Pointer) interface{} {
+			p := *(*unsafe.Pointer)(addPtr(base, off))
+			if p == nil {
+				// typed nil 保持原值语义
+				return reflect.NewAt(ft, addPtr(base, off)).Elem().Interface()
+			}
+			return makeIface(typ, p)
+		}
+	}
+	if emit := makeDirectEmitter(ft, off); emit != nil {
+		return emit
+	}
 	return func(base unsafe.Pointer) interface{} {
 		return reflect.NewAt(ft, addPtr(base, off)).Elem().Interface()
+	}
+}
+
+// makeDirectEmitter 基础类型与 time.Time 的直读装箱闭包
+// 按字段 Kind 直接从偏移读取并装箱，无法特化时返回 nil 交由 reflect 回退
+func makeDirectEmitter(ft reflect.Type, off uintptr) func(unsafe.Pointer) interface{} {
+	switch ft.Kind() {
+	case reflect.String:
+		return func(base unsafe.Pointer) interface{} {
+			return *(*string)(addPtr(base, off))
+		}
+	case reflect.Bool:
+		return func(base unsafe.Pointer) interface{} {
+			return *(*bool)(addPtr(base, off))
+		}
+	case reflect.Int:
+		return func(base unsafe.Pointer) interface{} {
+			return *(*int)(addPtr(base, off))
+		}
+	case reflect.Int8:
+		return func(base unsafe.Pointer) interface{} {
+			return *(*int8)(addPtr(base, off))
+		}
+	case reflect.Int16:
+		return func(base unsafe.Pointer) interface{} {
+			return *(*int16)(addPtr(base, off))
+		}
+	case reflect.Int32:
+		return func(base unsafe.Pointer) interface{} {
+			return *(*int32)(addPtr(base, off))
+		}
+	case reflect.Int64:
+		return func(base unsafe.Pointer) interface{} {
+			return *(*int64)(addPtr(base, off))
+		}
+	case reflect.Uint:
+		return func(base unsafe.Pointer) interface{} {
+			return *(*uint)(addPtr(base, off))
+		}
+	case reflect.Uint8:
+		return func(base unsafe.Pointer) interface{} {
+			return *(*uint8)(addPtr(base, off))
+		}
+	case reflect.Uint16:
+		return func(base unsafe.Pointer) interface{} {
+			return *(*uint16)(addPtr(base, off))
+		}
+	case reflect.Uint32:
+		return func(base unsafe.Pointer) interface{} {
+			return *(*uint32)(addPtr(base, off))
+		}
+	case reflect.Uint64, reflect.Uintptr:
+		return func(base unsafe.Pointer) interface{} {
+			return *(*uint64)(addPtr(base, off))
+		}
+	case reflect.Float32:
+		return func(base unsafe.Pointer) interface{} {
+			return *(*float32)(addPtr(base, off))
+		}
+	case reflect.Float64:
+		return func(base unsafe.Pointer) interface{} {
+			return *(*float64)(addPtr(base, off))
+		}
+	case reflect.Interface:
+		if ft.NumMethod() == 0 {
+			return func(base unsafe.Pointer) interface{} {
+				return *(*interface{})(addPtr(base, off))
+			}
+		}
+		return nil
+	case reflect.Struct:
+		if ft == timeType {
+			return func(base unsafe.Pointer) interface{} {
+				return *(*time.Time)(addPtr(base, off))
+			}
+		}
+		return nil
+	default:
+		return nil
 	}
 }
