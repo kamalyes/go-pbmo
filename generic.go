@@ -41,30 +41,41 @@ var lastEntries [entrySlotCount]entrySlot
 // 一次原子读同时取得转换器与双向字段缓存，稳态零分配
 // gen 记录构建时的缓存代数，与转换器当前代数不一致时回源刷新
 type cachedConverter struct {
-	key       typePair
+	key       fastKey
 	converter *BidiConverter
 	gen       uint64
 	pbToModel *fieldCache
 	modelToPB *fieldCache
 }
 
-// typeKey 生成类型对 key
-func typeKey[M any, P any]() typePair {
-	return typePair{
-		reflect.TypeFor[M](),
-		reflect.TypeFor[P](),
-	}
+// fastKey 热路径槽位 key，取类型对底层 rtype 数据指针组合
+// reflect.Type 底层 *rtype 指针唯一标识类型，等值比较退化为两次纯指针比较
+// 避免 typePair 接口等值比较引入的 ifaceeq 间接调用开销
+type fastKey struct {
+	model uintptr
+	pb    uintptr
 }
 
-// slotIndex 按类型对哈希取槽位
-// reflect.Type 底层为 *rtype 指针，取接口数据字做轻量哈希即可稳定区分类型
-func slotIndex(key typePair) int {
-	h := uintptr(ifaceDataPtr(key[0]))*31 + uintptr(ifaceDataPtr(key[1]))
-	return int(h & (entrySlotCount - 1))
+// derefType 指针类型解引用，与注册中心 key 语义保持一致
+func derefType(t reflect.Type) reflect.Type {
+	if t.Kind() == reflect.Ptr {
+		return t.Elem()
+	}
+	return t
+}
+
+// fastKeyOf 提取类型对的 rtype 指针、规范 typePair 与槽位下标
+// 哈希与 key 构造共用一次接口数据字提取，热路径零多余反射调用
+func fastKeyOf[M any, P any]() (fastKey, typePair, int) {
+	mt := derefType(reflect.TypeFor[M]())
+	pt := derefType(reflect.TypeFor[P]())
+	mk := uintptr(ifaceDataPtr(mt))
+	pk := uintptr(ifaceDataPtr(pt))
+	return fastKey{mk, pk}, typePair{mt, pt}, int((mk*31 + pk) & (entrySlotCount - 1))
 }
 
 // newCachedConverter 确保字段缓存已构建并生成热路径条目
-func newCachedConverter(key typePair, c *BidiConverter) *cachedConverter {
+func newCachedConverter(key fastKey, c *BidiConverter) *cachedConverter {
 	pbToModel, modelToPB := c.fieldCaches()
 	return &cachedConverter{
 		key:       key,
@@ -78,17 +89,39 @@ func newCachedConverter(key typePair, c *BidiConverter) *cachedConverter {
 // getOrInitCachedConverter 获取或初始化热路径缓存条目
 // 命中槽位仅一次原子读；未命中从 converterCache 取转换器后重建条目
 func getOrInitCachedConverter[M any, P any]() *cachedConverter {
-	key := typeKey[M, P]()
-	slot := &lastEntries[slotIndex(key)]
+	key, tp, idx := fastKeyOf[M, P]()
+	slot := &lastEntries[idx]
 	if e := slot.entry.Load(); e != nil && e.key == key && e.gen == e.converter.gen.Load() {
 		return e
 	}
 	var c *BidiConverter
-	if v, ok := converterCache.Load(key); ok {
+	if v, ok := converterCache.Load(tp); ok {
 		c = v.(*BidiConverter)
 	} else {
-		actual, _ := converterCache.LoadOrStore(key, NewBidiConverter(new(P), new(M)).WithAutoTimeConversion(true))
+		actual, _ := converterCache.LoadOrStore(tp, NewBidiConverter(new(P), new(M)).WithAutoTimeConversion(true))
 		c = actual.(*BidiConverter)
+	}
+	e := newCachedConverter(key, c)
+	slot.entry.Store(e)
+	return e
+}
+
+// lookupCachedConverter 按运行时元素类型查找热路径缓存条目
+// 槽位命中零装箱；未命中回源 converterCache，仍无则返回 nil 不创建
+// 用于元素类型与类型参数不一致的批量入口（如 SafeToPBs 的指针切片）
+func lookupCachedConverter[P any](modelType reflect.Type) *cachedConverter {
+	pt := reflect.TypeFor[P]()
+	key := fastKey{uintptr(ifaceDataPtr(modelType)), uintptr(ifaceDataPtr(pt))}
+	idx := int((key.model*31 + key.pb) & (entrySlotCount - 1))
+	slot := &lastEntries[idx]
+	if e := slot.entry.Load(); e != nil && e.key == key && e.gen == e.converter.gen.Load() {
+		return e
+	}
+	var c *BidiConverter
+	if v, ok := converterCache.Load(typePair{modelType, pt}); ok {
+		c = v.(*BidiConverter)
+	} else {
+		return nil
 	}
 	e := newCachedConverter(key, c)
 	slot.entry.Store(e)
@@ -107,10 +140,10 @@ func Register[M any, P any]() *BidiConverter {
 
 // RegisterWith[M, P] 注册 Model-PB 转换对（自定义配置）
 func RegisterWith[M any, P any](opts ...Option) *BidiConverter {
-	key := typeKey[M, P]()
+	key, tp, idx := fastKeyOf[M, P]()
 	c := NewBidiConverter(new(P), new(M), opts...)
-	converterCache.Store(key, c)
-	lastEntries[slotIndex(key)].entry.Store(newCachedConverter(key, c))
+	converterCache.Store(tp, c)
+	lastEntries[idx].entry.Store(newCachedConverter(key, c))
 	return c
 }
 
@@ -220,13 +253,16 @@ func SafeToPBs[M any, P any](models []M) ([]*P, *BatchResult) {
 	mType := reflect.TypeOf(models).Elem()
 
 	if mType.Kind() == reflect.Ptr {
-		elemType := mType.Elem()
-		pbType := reflect.TypeFor[P]()
-		c, ok := findConverter(elemType, pbType)
-		if !ok {
+		// 槽位命中零装箱；未命中回源 converterCache 后仍走惰性创建回退
+		var c *BidiConverter
+		var cache *fieldCache
+		if e := lookupCachedConverter[P](mType.Elem()); e != nil {
+			c = e.converter
+			cache = e.modelToPB
+		} else {
 			c = getOrInitConverter[M, P]()
+			cache = c.modelToPBFieldCache()
 		}
-		cache := c.modelToPBFieldCache()
 		pureFast := cache.mergedCopyFunc != nil && len(cache.slowEntries) == 0
 		// 切片数据指针按元素大小步进，避免逐元素 reflect.ValueOf 构造
 		base := unsafe.SliceData(models)

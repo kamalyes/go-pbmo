@@ -23,10 +23,26 @@ import (
 	"google.golang.org/protobuf/types/known/wrapperspb"
 )
 
-// updatesPlanKey 更新计划缓存 key（结构体类型 + 构建方向）
-type updatesPlanKey struct {
-	typ     reflect.Type
-	isModel bool
+// updatesPlanKey 更新计划缓存 key（rtype 指针 + 构建方向位）
+// reflect.Type 底层 *rtype 指针至少 2 字节对齐，低位恒为 0，可安全承载方向标记
+// 单字 key 装入接口为零拷贝直接存储，等值比较退化为一次指针比较，热路径零装箱
+type updatesPlanKey uintptr
+
+const (
+	updatesPlanPBBit uintptr = 1 // PB 方向标记位，Model 方向保持纯 rtype 指针
+)
+
+// updatesPlanKeyOf 生成更新计划缓存 key，顺带返回解引用后的结构体类型
+func updatesPlanKeyOf[M any](isModel bool) (updatesPlanKey, reflect.Type) {
+	t := reflect.TypeFor[M]()
+	if t.Kind() == reflect.Ptr {
+		t = t.Elem()
+	}
+	k := updatesPlanKey(ifaceDataPtr(t))
+	if !isModel {
+		k |= updatesPlanKey(updatesPlanPBBit)
+	}
+	return k, t
 }
 
 // updateFieldEntry 单字段的更新构建计划
@@ -53,11 +69,7 @@ const wrapperspbPkgPath = "google.golang.org/protobuf/types/known/wrapperspb"
 
 // getUpdatesPlan 获取（或构建）指定类型的更新计划
 func getUpdatesPlan[M any](isModel bool) *updatesPlan {
-	t := reflect.TypeFor[M]()
-	if t.Kind() == reflect.Ptr {
-		t = t.Elem()
-	}
-	key := updatesPlanKey{t, isModel}
+	key, t := updatesPlanKeyOf[M](isModel)
 	if p, ok := updatesPlans.Load(key); ok {
 		return p
 	}
