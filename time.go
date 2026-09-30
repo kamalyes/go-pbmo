@@ -22,6 +22,7 @@ import (
 var (
 	timeType         = reflect.TypeOf(time.Time{})
 	timePtrType      = reflect.TypeOf((*time.Time)(nil))
+	timestampType    = reflect.TypeOf(timestamppb.Timestamp{})
 	timestampPtrType = reflect.TypeOf((*timestamppb.Timestamp)(nil))
 )
 

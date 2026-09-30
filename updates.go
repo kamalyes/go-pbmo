@@ -124,8 +124,16 @@ func (b *UpdatesBuilder) SetStringVal(key string, val *wrapperspb.StringValue) *
 }
 
 func (b *UpdatesBuilder) SetStringValAny(key string, val *wrapperspb.StringValue) *UpdatesBuilder {
-	if val != nil {
-		b.updates[key] = val.Value
+	return setWrapperVal(b, key, val)
+}
+
+// setWrapperVal 在 wrapper 非 nil 时将其基础值写入更新字典
+func setWrapperVal[S any, W any, P interface {
+	*W
+	GetValue() S
+}](b *UpdatesBuilder, key string, v P) *UpdatesBuilder {
+	if v != nil {
+		b.updates[key] = v.GetValue()
 	}
 	return b
 }
@@ -172,38 +180,23 @@ func (b *UpdatesBuilder) SetJSONSlice(key string, value interface{}) *UpdatesBui
 }
 
 func (b *UpdatesBuilder) SetInt32Val(key string, val *wrapperspb.Int32Value) *UpdatesBuilder {
-	if val != nil {
-		b.updates[key] = val.Value
-	}
-	return b
+	return setWrapperVal(b, key, val)
 }
 
 func (b *UpdatesBuilder) SetInt64Val(key string, val *wrapperspb.Int64Value) *UpdatesBuilder {
-	if val != nil {
-		b.updates[key] = val.Value
-	}
-	return b
+	return setWrapperVal(b, key, val)
 }
 
 func (b *UpdatesBuilder) SetBoolVal(key string, val *wrapperspb.BoolValue) *UpdatesBuilder {
-	if val != nil {
-		b.updates[key] = val.Value
-	}
-	return b
+	return setWrapperVal(b, key, val)
 }
 
 func (b *UpdatesBuilder) SetFloatVal(key string, val *wrapperspb.FloatValue) *UpdatesBuilder {
-	if val != nil {
-		b.updates[key] = val.Value
-	}
-	return b
+	return setWrapperVal(b, key, val)
 }
 
 func (b *UpdatesBuilder) SetDoubleVal(key string, val *wrapperspb.DoubleValue) *UpdatesBuilder {
-	if val != nil {
-		b.updates[key] = val.Value
-	}
-	return b
+	return setWrapperVal(b, key, val)
 }
 
 // --- 管理方法 ---

@@ -420,106 +420,13 @@ func makeSameTypeCopyFunc(t reflect.Type, srcOffset, dstOffset uintptr) fieldCop
 // makeIntegerCopyFunc 生成整数类型转换的 unsafe 闭包
 // 常见组合静态实例化泛型转换核烘焙偏移，罕见组合回退宽度泛化组拷贝体
 func makeIntegerCopyFunc(srcKind, dstKind reflect.Kind, srcOffset, dstOffset uintptr) fieldCopyFunc {
-	switch {
-	// ====== int32 类型的所有组合（最常见：protobuf int32 ↔ Go int） ======
-	case srcKind == reflect.Int32 && dstKind == reflect.Int:
-		return func(srcBase, dstBase unsafe.Pointer) {
-			convertValue[int32, int](dstBase, srcBase, dstOffset, srcOffset)
-		}
-	case srcKind == reflect.Int && dstKind == reflect.Int32:
-		return func(srcBase, dstBase unsafe.Pointer) {
-			convertValue[int, int32](dstBase, srcBase, dstOffset, srcOffset)
-		}
-	case srcKind == reflect.Int32 && dstKind == reflect.Int64:
-		return func(srcBase, dstBase unsafe.Pointer) {
-			convertValue[int32, int64](dstBase, srcBase, dstOffset, srcOffset)
-		}
-	case srcKind == reflect.Int64 && dstKind == reflect.Int32:
-		return func(srcBase, dstBase unsafe.Pointer) {
-			convertValue[int64, int32](dstBase, srcBase, dstOffset, srcOffset)
-		}
-	case srcKind == reflect.Int32 && dstKind == reflect.Int16:
-		return func(srcBase, dstBase unsafe.Pointer) {
-			convertValue[int32, int16](dstBase, srcBase, dstOffset, srcOffset)
-		}
-	case srcKind == reflect.Int16 && dstKind == reflect.Int32:
-		return func(srcBase, dstBase unsafe.Pointer) {
-			convertValue[int16, int32](dstBase, srcBase, dstOffset, srcOffset)
-		}
-	case srcKind == reflect.Int32 && dstKind == reflect.Int8:
-		return func(srcBase, dstBase unsafe.Pointer) {
-			convertValue[int32, int8](dstBase, srcBase, dstOffset, srcOffset)
-		}
-	case srcKind == reflect.Int8 && dstKind == reflect.Int32:
-		return func(srcBase, dstBase unsafe.Pointer) {
-			convertValue[int8, int32](dstBase, srcBase, dstOffset, srcOffset)
-		}
-
-	// ====== int64 类型的组合 ======
-	case srcKind == reflect.Int64 && dstKind == reflect.Int:
-		return func(srcBase, dstBase unsafe.Pointer) {
-			convertValue[int64, int](dstBase, srcBase, dstOffset, srcOffset)
-		}
-	case srcKind == reflect.Int && dstKind == reflect.Int64:
-		return func(srcBase, dstBase unsafe.Pointer) {
-			convertValue[int, int64](dstBase, srcBase, dstOffset, srcOffset)
-		}
-
-	// ====== uint32 类型的组合 ======
-	case srcKind == reflect.Uint32 && dstKind == reflect.Uint64:
-		return func(srcBase, dstBase unsafe.Pointer) {
-			convertValue[uint32, uint64](dstBase, srcBase, dstOffset, srcOffset)
-		}
-	case srcKind == reflect.Uint64 && dstKind == reflect.Uint32:
-		return func(srcBase, dstBase unsafe.Pointer) {
-			convertValue[uint64, uint32](dstBase, srcBase, dstOffset, srcOffset)
-		}
-	case srcKind == reflect.Uint32 && dstKind == reflect.Uint:
-		return func(srcBase, dstBase unsafe.Pointer) {
-			convertValue[uint32, uint](dstBase, srcBase, dstOffset, srcOffset)
-		}
-	case srcKind == reflect.Uint && dstKind == reflect.Uint32:
-		return func(srcBase, dstBase unsafe.Pointer) {
-			convertValue[uint, uint32](dstBase, srcBase, dstOffset, srcOffset)
-		}
-
-	// ====== 有符号 ↔ 无符号的转换 ======
-	case srcKind == reflect.Int32 && dstKind == reflect.Uint32:
-		return func(srcBase, dstBase unsafe.Pointer) {
-			convertValue[int32, uint32](dstBase, srcBase, dstOffset, srcOffset)
-		}
-	case srcKind == reflect.Uint32 && dstKind == reflect.Int32:
-		return func(srcBase, dstBase unsafe.Pointer) {
-			convertValue[uint32, int32](dstBase, srcBase, dstOffset, srcOffset)
-		}
-	case srcKind == reflect.Int32 && dstKind == reflect.Uint64:
-		return func(srcBase, dstBase unsafe.Pointer) {
-			convertValue[int32, uint64](dstBase, srcBase, dstOffset, srcOffset)
-		}
-	case srcKind == reflect.Int64 && dstKind == reflect.Uint64:
-		return func(srcBase, dstBase unsafe.Pointer) {
-			convertValue[int64, uint64](dstBase, srcBase, dstOffset, srcOffset)
-		}
-	case srcKind == reflect.Uint64 && dstKind == reflect.Int64:
-		return func(srcBase, dstBase unsafe.Pointer) {
-			convertValue[uint64, int64](dstBase, srcBase, dstOffset, srcOffset)
-		}
-	case srcKind == reflect.Uint32 && dstKind == reflect.Int:
-		return func(srcBase, dstBase unsafe.Pointer) {
-			convertValue[uint32, int](dstBase, srcBase, dstOffset, srcOffset)
-		}
-	case srcKind == reflect.Int && dstKind == reflect.Uint32:
-		return func(srcBase, dstBase unsafe.Pointer) {
-			convertValue[int, uint32](dstBase, srcBase, dstOffset, srcOffset)
-		}
-
-	// ====== 通用的有符号读取 → 有符号写入 ======
-	default:
-		pure, _ := pureIntegerCopyGeneric(srcKind, dstKind)
-		pairs := []uintptr{srcOffset, dstOffset}
-		return func(srcBase, dstBase unsafe.Pointer) {
-			pure(dstBase, srcBase, pairs)
-		}
+	if fn := intCopyFromSrc(srcKind, dstKind, srcOffset, dstOffset); fn != nil {
+		return fn
+	}
+	// 非标准整数种类回退宽度泛化实现，偏移烘焙进闭包以立即数调用
+	pure, _ := pureIntegerCopyGeneric(srcKind, dstKind)
+	return func(srcBase, dstBase unsafe.Pointer) {
+		pure(dstBase, srcBase, dstOffset, srcOffset)
 	}
 }
 
@@ -569,296 +476,103 @@ func makeTimePtrToTSCopyFunc(srcOffset, dstOffset uintptr) fieldCopyFunc {
 }
 
 // makeWrapperCopyFunc 根据 wrapper 类型和方向生成 unsafe 转换闭包
+// 四个方向统一走泛型包装/解包闭包，Value 字段偏移在构建期一次解析
 func makeWrapperCopyFunc(wc *wrapperConverter, dir int, srcOffset, dstOffset uintptr) fieldCopyFunc {
 	wt := wc.wrapperType
+	f, ok := wt.Elem().FieldByName("Value")
+	if !ok {
+		return nil
+	}
+	off := f.Offset
 
 	switch dir {
 	case 0: // *T → *wrapperspb.XxxValue (Model→PB 包装)
-		switch {
-		case wt == boolValuePtrType:
-			return func(srcBase, dstBase unsafe.Pointer) {
-				srcPtr := *(**bool)(addPtr(srcBase, srcOffset))
-				if srcPtr == nil {
-					*(**wrapperspb.BoolValue)(addPtr(dstBase, dstOffset)) = nil
-					return
-				}
-				*(**wrapperspb.BoolValue)(addPtr(dstBase, dstOffset)) = wrapperspb.Bool(*srcPtr)
-			}
-		case wt == int32ValuePtrType:
-			return func(srcBase, dstBase unsafe.Pointer) {
-				srcPtr := *(**int32)(addPtr(srcBase, srcOffset))
-				if srcPtr == nil {
-					*(**wrapperspb.Int32Value)(addPtr(dstBase, dstOffset)) = nil
-					return
-				}
-				*(**wrapperspb.Int32Value)(addPtr(dstBase, dstOffset)) = wrapperspb.Int32(*srcPtr)
-			}
-		case wt == int64ValuePtrType:
-			return func(srcBase, dstBase unsafe.Pointer) {
-				srcPtr := *(**int64)(addPtr(srcBase, srcOffset))
-				if srcPtr == nil {
-					*(**wrapperspb.Int64Value)(addPtr(dstBase, dstOffset)) = nil
-					return
-				}
-				*(**wrapperspb.Int64Value)(addPtr(dstBase, dstOffset)) = wrapperspb.Int64(*srcPtr)
-			}
-		case wt == uint32ValuePtrType:
-			return func(srcBase, dstBase unsafe.Pointer) {
-				srcPtr := *(**uint32)(addPtr(srcBase, srcOffset))
-				if srcPtr == nil {
-					*(**wrapperspb.UInt32Value)(addPtr(dstBase, dstOffset)) = nil
-					return
-				}
-				*(**wrapperspb.UInt32Value)(addPtr(dstBase, dstOffset)) = wrapperspb.UInt32(*srcPtr)
-			}
-		case wt == uint64ValuePtrType:
-			return func(srcBase, dstBase unsafe.Pointer) {
-				srcPtr := *(**uint64)(addPtr(srcBase, srcOffset))
-				if srcPtr == nil {
-					*(**wrapperspb.UInt64Value)(addPtr(dstBase, dstOffset)) = nil
-					return
-				}
-				*(**wrapperspb.UInt64Value)(addPtr(dstBase, dstOffset)) = wrapperspb.UInt64(*srcPtr)
-			}
-		case wt == floatValuePtrType:
-			return func(srcBase, dstBase unsafe.Pointer) {
-				srcPtr := *(**float32)(addPtr(srcBase, srcOffset))
-				if srcPtr == nil {
-					*(**wrapperspb.FloatValue)(addPtr(dstBase, dstOffset)) = nil
-					return
-				}
-				*(**wrapperspb.FloatValue)(addPtr(dstBase, dstOffset)) = wrapperspb.Float(*srcPtr)
-			}
-		case wt == doubleValuePtrType:
-			return func(srcBase, dstBase unsafe.Pointer) {
-				srcPtr := *(**float64)(addPtr(srcBase, srcOffset))
-				if srcPtr == nil {
-					*(**wrapperspb.DoubleValue)(addPtr(dstBase, dstOffset)) = nil
-					return
-				}
-				*(**wrapperspb.DoubleValue)(addPtr(dstBase, dstOffset)) = wrapperspb.Double(*srcPtr)
-			}
-		case wt == stringValuePtrType:
-			return func(srcBase, dstBase unsafe.Pointer) {
-				srcPtr := *(**string)(addPtr(srcBase, srcOffset))
-				if srcPtr == nil {
-					*(**wrapperspb.StringValue)(addPtr(dstBase, dstOffset)) = nil
-					return
-				}
-				*(**wrapperspb.StringValue)(addPtr(dstBase, dstOffset)) = wrapperspb.String(*srcPtr)
-			}
+		switch wt {
+		case boolValuePtrType:
+			return wrapPtrCopy[bool, wrapperspb.BoolValue](off, srcOffset, dstOffset)
+		case int32ValuePtrType:
+			return wrapPtrCopy[int32, wrapperspb.Int32Value](off, srcOffset, dstOffset)
+		case int64ValuePtrType:
+			return wrapPtrCopy[int64, wrapperspb.Int64Value](off, srcOffset, dstOffset)
+		case uint32ValuePtrType:
+			return wrapPtrCopy[uint32, wrapperspb.UInt32Value](off, srcOffset, dstOffset)
+		case uint64ValuePtrType:
+			return wrapPtrCopy[uint64, wrapperspb.UInt64Value](off, srcOffset, dstOffset)
+		case floatValuePtrType:
+			return wrapPtrCopy[float32, wrapperspb.FloatValue](off, srcOffset, dstOffset)
+		case doubleValuePtrType:
+			return wrapPtrCopy[float64, wrapperspb.DoubleValue](off, srcOffset, dstOffset)
+		case stringValuePtrType:
+			return wrapPtrCopy[string, wrapperspb.StringValue](off, srcOffset, dstOffset)
 		}
 
 	case 1: // *wrapperspb.XxxValue → *T (PB→Model 解包)
-		switch {
-		case wt == boolValuePtrType:
-			return func(srcBase, dstBase unsafe.Pointer) {
-				srcPtr := *(**wrapperspb.BoolValue)(addPtr(srcBase, srcOffset))
-				if srcPtr == nil {
-					*(**bool)(addPtr(dstBase, dstOffset)) = nil
-					return
-				}
-				val := srcPtr.Value
-				*(**bool)(addPtr(dstBase, dstOffset)) = &val
-			}
-		case wt == int32ValuePtrType:
-			return func(srcBase, dstBase unsafe.Pointer) {
-				srcPtr := *(**wrapperspb.Int32Value)(addPtr(srcBase, srcOffset))
-				if srcPtr == nil {
-					*(**int32)(addPtr(dstBase, dstOffset)) = nil
-					return
-				}
-				val := srcPtr.Value
-				*(**int32)(addPtr(dstBase, dstOffset)) = &val
-			}
-		case wt == int64ValuePtrType:
-			return func(srcBase, dstBase unsafe.Pointer) {
-				srcPtr := *(**wrapperspb.Int64Value)(addPtr(srcBase, srcOffset))
-				if srcPtr == nil {
-					*(**int64)(addPtr(dstBase, dstOffset)) = nil
-					return
-				}
-				val := srcPtr.Value
-				*(**int64)(addPtr(dstBase, dstOffset)) = &val
-			}
-		case wt == uint32ValuePtrType:
-			return func(srcBase, dstBase unsafe.Pointer) {
-				srcPtr := *(**wrapperspb.UInt32Value)(addPtr(srcBase, srcOffset))
-				if srcPtr == nil {
-					*(**uint32)(addPtr(dstBase, dstOffset)) = nil
-					return
-				}
-				val := srcPtr.Value
-				*(**uint32)(addPtr(dstBase, dstOffset)) = &val
-			}
-		case wt == uint64ValuePtrType:
-			return func(srcBase, dstBase unsafe.Pointer) {
-				srcPtr := *(**wrapperspb.UInt64Value)(addPtr(srcBase, srcOffset))
-				if srcPtr == nil {
-					*(**uint64)(addPtr(dstBase, dstOffset)) = nil
-					return
-				}
-				val := srcPtr.Value
-				*(**uint64)(addPtr(dstBase, dstOffset)) = &val
-			}
-		case wt == floatValuePtrType:
-			return func(srcBase, dstBase unsafe.Pointer) {
-				srcPtr := *(**wrapperspb.FloatValue)(addPtr(srcBase, srcOffset))
-				if srcPtr == nil {
-					*(**float32)(addPtr(dstBase, dstOffset)) = nil
-					return
-				}
-				val := srcPtr.Value
-				*(**float32)(addPtr(dstBase, dstOffset)) = &val
-			}
-		case wt == doubleValuePtrType:
-			return func(srcBase, dstBase unsafe.Pointer) {
-				srcPtr := *(**wrapperspb.DoubleValue)(addPtr(srcBase, srcOffset))
-				if srcPtr == nil {
-					*(**float64)(addPtr(dstBase, dstOffset)) = nil
-					return
-				}
-				val := srcPtr.Value
-				*(**float64)(addPtr(dstBase, dstOffset)) = &val
-			}
-		case wt == stringValuePtrType:
-			return func(srcBase, dstBase unsafe.Pointer) {
-				srcPtr := *(**wrapperspb.StringValue)(addPtr(srcBase, srcOffset))
-				if srcPtr == nil {
-					*(**string)(addPtr(dstBase, dstOffset)) = nil
-					return
-				}
-				val := srcPtr.Value
-				*(**string)(addPtr(dstBase, dstOffset)) = &val
-			}
+		switch wt {
+		case boolValuePtrType:
+			return unwrapPtrCopy[bool, wrapperspb.BoolValue](off, srcOffset, dstOffset)
+		case int32ValuePtrType:
+			return unwrapPtrCopy[int32, wrapperspb.Int32Value](off, srcOffset, dstOffset)
+		case int64ValuePtrType:
+			return unwrapPtrCopy[int64, wrapperspb.Int64Value](off, srcOffset, dstOffset)
+		case uint32ValuePtrType:
+			return unwrapPtrCopy[uint32, wrapperspb.UInt32Value](off, srcOffset, dstOffset)
+		case uint64ValuePtrType:
+			return unwrapPtrCopy[uint64, wrapperspb.UInt64Value](off, srcOffset, dstOffset)
+		case floatValuePtrType:
+			return unwrapPtrCopy[float32, wrapperspb.FloatValue](off, srcOffset, dstOffset)
+		case doubleValuePtrType:
+			return unwrapPtrCopy[float64, wrapperspb.DoubleValue](off, srcOffset, dstOffset)
+		case stringValuePtrType:
+			return unwrapPtrCopy[string, wrapperspb.StringValue](off, srcOffset, dstOffset)
 		}
 
-	case 2:
-		switch {
-		case wt == boolValuePtrType:
-			return func(srcBase, dstBase unsafe.Pointer) {
-				val := *(*bool)(addPtr(srcBase, srcOffset))
-				*(**wrapperspb.BoolValue)(addPtr(dstBase, dstOffset)) = wrapperspb.Bool(val)
-			}
-		case wt == int32ValuePtrType:
-			return func(srcBase, dstBase unsafe.Pointer) {
-				val := *(*int32)(addPtr(srcBase, srcOffset))
-				*(**wrapperspb.Int32Value)(addPtr(dstBase, dstOffset)) = wrapperspb.Int32(val)
-			}
-		case wt == int64ValuePtrType:
-			return func(srcBase, dstBase unsafe.Pointer) {
-				val := *(*int64)(addPtr(srcBase, srcOffset))
-				*(**wrapperspb.Int64Value)(addPtr(dstBase, dstOffset)) = wrapperspb.Int64(val)
-			}
-		case wt == uint32ValuePtrType:
-			return func(srcBase, dstBase unsafe.Pointer) {
-				val := *(*uint32)(addPtr(srcBase, srcOffset))
-				*(**wrapperspb.UInt32Value)(addPtr(dstBase, dstOffset)) = wrapperspb.UInt32(val)
-			}
-		case wt == uint64ValuePtrType:
-			return func(srcBase, dstBase unsafe.Pointer) {
-				val := *(*uint64)(addPtr(srcBase, srcOffset))
-				*(**wrapperspb.UInt64Value)(addPtr(dstBase, dstOffset)) = wrapperspb.UInt64(val)
-			}
-		case wt == floatValuePtrType:
-			return func(srcBase, dstBase unsafe.Pointer) {
-				val := *(*float32)(addPtr(srcBase, srcOffset))
-				*(**wrapperspb.FloatValue)(addPtr(dstBase, dstOffset)) = wrapperspb.Float(val)
-			}
-		case wt == doubleValuePtrType:
-			return func(srcBase, dstBase unsafe.Pointer) {
-				val := *(*float64)(addPtr(srcBase, srcOffset))
-				*(**wrapperspb.DoubleValue)(addPtr(dstBase, dstOffset)) = wrapperspb.Double(val)
-			}
-		case wt == stringValuePtrType:
-			return func(srcBase, dstBase unsafe.Pointer) {
-				val := *(*string)(addPtr(srcBase, srcOffset))
-				*(**wrapperspb.StringValue)(addPtr(dstBase, dstOffset)) = wrapperspb.String(val)
-			}
+	case 2: // T → *wrapperspb.XxxValue
+		switch wt {
+		case boolValuePtrType:
+			return wrapValCopy[bool, wrapperspb.BoolValue](off, srcOffset, dstOffset)
+		case int32ValuePtrType:
+			return wrapValCopy[int32, wrapperspb.Int32Value](off, srcOffset, dstOffset)
+		case int64ValuePtrType:
+			return wrapValCopy[int64, wrapperspb.Int64Value](off, srcOffset, dstOffset)
+		case uint32ValuePtrType:
+			return wrapValCopy[uint32, wrapperspb.UInt32Value](off, srcOffset, dstOffset)
+		case uint64ValuePtrType:
+			return wrapValCopy[uint64, wrapperspb.UInt64Value](off, srcOffset, dstOffset)
+		case floatValuePtrType:
+			return wrapValCopy[float32, wrapperspb.FloatValue](off, srcOffset, dstOffset)
+		case doubleValuePtrType:
+			return wrapValCopy[float64, wrapperspb.DoubleValue](off, srcOffset, dstOffset)
+		case stringValuePtrType:
+			return wrapValCopy[string, wrapperspb.StringValue](off, srcOffset, dstOffset)
 		}
 
-	case 3:
-		switch {
-		case wt == boolValuePtrType:
-			return func(srcBase, dstBase unsafe.Pointer) {
-				srcPtr := *(**wrapperspb.BoolValue)(addPtr(srcBase, srcOffset))
-				if srcPtr == nil {
-					*(*bool)(addPtr(dstBase, dstOffset)) = false
-					return
-				}
-				*(*bool)(addPtr(dstBase, dstOffset)) = srcPtr.Value
-			}
-		case wt == int32ValuePtrType:
-			return func(srcBase, dstBase unsafe.Pointer) {
-				srcPtr := *(**wrapperspb.Int32Value)(addPtr(srcBase, srcOffset))
-				if srcPtr == nil {
-					*(*int32)(addPtr(dstBase, dstOffset)) = 0
-					return
-				}
-				*(*int32)(addPtr(dstBase, dstOffset)) = srcPtr.Value
-			}
-		case wt == int64ValuePtrType:
-			return func(srcBase, dstBase unsafe.Pointer) {
-				srcPtr := *(**wrapperspb.Int64Value)(addPtr(srcBase, srcOffset))
-				if srcPtr == nil {
-					*(*int64)(addPtr(dstBase, dstOffset)) = 0
-					return
-				}
-				*(*int64)(addPtr(dstBase, dstOffset)) = srcPtr.Value
-			}
-		case wt == uint32ValuePtrType:
-			return func(srcBase, dstBase unsafe.Pointer) {
-				srcPtr := *(**wrapperspb.UInt32Value)(addPtr(srcBase, srcOffset))
-				if srcPtr == nil {
-					*(*uint32)(addPtr(dstBase, dstOffset)) = 0
-					return
-				}
-				*(*uint32)(addPtr(dstBase, dstOffset)) = srcPtr.Value
-			}
-		case wt == uint64ValuePtrType:
-			return func(srcBase, dstBase unsafe.Pointer) {
-				srcPtr := *(**wrapperspb.UInt64Value)(addPtr(srcBase, srcOffset))
-				if srcPtr == nil {
-					*(*uint64)(addPtr(dstBase, dstOffset)) = 0
-					return
-				}
-				*(*uint64)(addPtr(dstBase, dstOffset)) = srcPtr.Value
-			}
-		case wt == floatValuePtrType:
-			return func(srcBase, dstBase unsafe.Pointer) {
-				srcPtr := *(**wrapperspb.FloatValue)(addPtr(srcBase, srcOffset))
-				if srcPtr == nil {
-					*(*float32)(addPtr(dstBase, dstOffset)) = 0
-					return
-				}
-				*(*float32)(addPtr(dstBase, dstOffset)) = srcPtr.Value
-			}
-		case wt == doubleValuePtrType:
-			return func(srcBase, dstBase unsafe.Pointer) {
-				srcPtr := *(**wrapperspb.DoubleValue)(addPtr(srcBase, srcOffset))
-				if srcPtr == nil {
-					*(*float64)(addPtr(dstBase, dstOffset)) = 0
-					return
-				}
-				*(*float64)(addPtr(dstBase, dstOffset)) = srcPtr.Value
-			}
-		case wt == stringValuePtrType:
-			return func(srcBase, dstBase unsafe.Pointer) {
-				srcPtr := *(**wrapperspb.StringValue)(addPtr(srcBase, srcOffset))
-				if srcPtr == nil {
-					*(*string)(addPtr(dstBase, dstOffset)) = ""
-					return
-				}
-				*(*string)(addPtr(dstBase, dstOffset)) = srcPtr.Value
-			}
+	case 3: // *wrapperspb.XxxValue → T
+		switch wt {
+		case boolValuePtrType:
+			return unwrapValCopy[bool, wrapperspb.BoolValue](off, srcOffset, dstOffset)
+		case int32ValuePtrType:
+			return unwrapValCopy[int32, wrapperspb.Int32Value](off, srcOffset, dstOffset)
+		case int64ValuePtrType:
+			return unwrapValCopy[int64, wrapperspb.Int64Value](off, srcOffset, dstOffset)
+		case uint32ValuePtrType:
+			return unwrapValCopy[uint32, wrapperspb.UInt32Value](off, srcOffset, dstOffset)
+		case uint64ValuePtrType:
+			return unwrapValCopy[uint64, wrapperspb.UInt64Value](off, srcOffset, dstOffset)
+		case floatValuePtrType:
+			return unwrapValCopy[float32, wrapperspb.FloatValue](off, srcOffset, dstOffset)
+		case doubleValuePtrType:
+			return unwrapValCopy[float64, wrapperspb.DoubleValue](off, srcOffset, dstOffset)
+		case stringValuePtrType:
+			return unwrapValCopy[string, wrapperspb.StringValue](off, srcOffset, dstOffset)
 		}
 	}
 	return nil
 }
 
 // makeConvertibleCopyFunc 生成可转换类型（相同底层类型）的 unsafe 拷贝闭包
+// 跨类数值组合（如 int32→float32）位模式不等，回退 reflect 慢路径正确转换
 func makeConvertibleCopyFunc(srcType, dstType reflect.Type, srcOffset, dstOffset uintptr) fieldCopyFunc {
-	if srcType.Size() != dstType.Size() {
+	if srcType.Size() != dstType.Size() || srcType.Kind() != dstType.Kind() {
 		return nil
 	}
 	return memmoveDirect(srcType.Size(), srcOffset, dstOffset)
@@ -980,30 +694,27 @@ func makeMapStructCopyFunc(srcType, dstType reflect.Type, srcOffset, dstOffset u
 	return nil
 }
 
+// loadStructFieldCache 获取结构体对的子缓存，未命中时构建并入缓存
+func loadStructFieldCache(srcType, dstType reflect.Type) *structFieldCache {
+	subCache, ok := globalStructFieldCache.Load(structFieldTypePair{srcType, dstType})
+	if !ok {
+		subCache = buildStructFieldCache(srcType, dstType, true)
+		globalStructFieldCache.Store(structFieldTypePair{srcType, dstType}, subCache)
+	}
+	return subCache
+}
+
 // makeStructPtrCopyFunc 生成结构体指针转换的 copyFunc（*StructA → *StructB）
-// 设计思想：利用缓存的子结构体字段映射（structFieldCache），将嵌套结构体转换
-// 从反射路径转为 unsafe 快速路径：
-//  1. 解引用源指针，若 nil 则设置目标为 nil
-//  2. reflect.New(dstElemType) 分配目标结构体
-//  3. 执行子缓存的 fastEntries（mergedFn 或逐个 copyFunc）
-//  4. 执行子缓存的 slowEntries（reflect 回退）
-//
-// 性能提升：从 3-5x 原生 优化到 ≈1.5x 原生（消除 FieldByName/convertFieldAuto 开销）
+// 利用缓存的子结构体字段映射（structFieldCache），将嵌套结构体转换转为 unsafe 快速路径
 func makeStructPtrCopyFunc(srcType, dstType reflect.Type, srcOffset, dstOffset uintptr) fieldCopyFunc {
 	srcElemType := srcType.Elem()
 	dstElemType := dstType.Elem()
 
-	subCache, ok := globalStructFieldCache.Load(structFieldTypePair{srcElemType, dstElemType})
-	if !ok {
-		subCache = buildStructFieldCache(srcElemType, dstElemType, true)
-		globalStructFieldCache.Store(structFieldTypePair{srcElemType, dstElemType}, subCache)
-	}
-
-	sc := subCache
+	sc := loadStructFieldCache(srcElemType, dstElemType)
 	subMerged := sc.mergedFn
-	needSubConvert := len(sc.slowEntries) > 0
+	hasSlowEntries := len(sc.slowEntries) > 0
 
-	if !needSubConvert && subMerged != nil {
+	if subMerged != nil {
 		return func(srcBase, dstBase unsafe.Pointer) {
 			srcPtr := *(*unsafe.Pointer)(addPtr(srcBase, srcOffset))
 			if srcPtr == nil {
@@ -1013,21 +724,9 @@ func makeStructPtrCopyFunc(srcType, dstType reflect.Type, srcOffset, dstOffset u
 			dstPtr := reflect.New(dstElemType).UnsafePointer()
 			*(*unsafe.Pointer)(addPtr(dstBase, dstOffset)) = dstPtr
 			subMerged(srcPtr, dstPtr)
-		}
-	}
-
-	if subMerged != nil {
-		return func(srcBase, dstBase unsafe.Pointer) {
-			srcPtr := *(*unsafe.Pointer)(addPtr(srcBase, srcOffset))
-			if srcPtr == nil {
-				*(*unsafe.Pointer)(addPtr(dstBase, dstOffset)) = nil
-				return
+			if hasSlowEntries {
+				applyStructSlowEntriesUnsafe(srcPtr, dstPtr, sc)
 			}
-			dstPtrVal := reflect.New(dstElemType)
-			dstPtr := dstPtrVal.UnsafePointer()
-			*(*unsafe.Pointer)(addPtr(dstBase, dstOffset)) = dstPtr
-			subMerged(srcPtr, dstPtr)
-			applyStructSlowEntriesUnsafe(srcPtr, dstPtr, sc)
 		}
 	}
 
@@ -1038,33 +737,20 @@ func makeStructPtrCopyFunc(srcType, dstType reflect.Type, srcOffset, dstOffset u
 // 与 makeStructPtrCopyFunc 类似，但处理值类型而非指针类型
 // 通过预构建的 structFieldCache 子缓存实现嵌套结构体的快速转换
 func makeStructCopyFunc(srcType, dstType reflect.Type, srcOffset, dstOffset uintptr) fieldCopyFunc {
-	subCache, ok := globalStructFieldCache.Load(structFieldTypePair{srcType, dstType})
-	if !ok {
-		subCache = buildStructFieldCache(srcType, dstType, true)
-		globalStructFieldCache.Store(structFieldTypePair{srcType, dstType}, subCache)
-	}
-
-	sc := subCache
+	sc := loadStructFieldCache(srcType, dstType)
 	subMerged := sc.mergedFn
-	needSubConvert := len(sc.slowEntries) > 0
-
 	if subMerged == nil {
 		return nil
 	}
 
-	if !needSubConvert {
-		return func(srcBase, dstBase unsafe.Pointer) {
-			srcPtr := addPtr(srcBase, srcOffset)
-			dstPtr := addPtr(dstBase, dstOffset)
-			subMerged(srcPtr, dstPtr)
-		}
-	}
-
+	hasSlowEntries := len(sc.slowEntries) > 0
 	return func(srcBase, dstBase unsafe.Pointer) {
 		srcPtr := addPtr(srcBase, srcOffset)
 		dstPtr := addPtr(dstBase, dstOffset)
 		subMerged(srcPtr, dstPtr)
-		applyStructSlowEntriesUnsafe(srcPtr, dstPtr, sc)
+		if hasSlowEntries {
+			applyStructSlowEntriesUnsafe(srcPtr, dstPtr, sc)
+		}
 	}
 }
 
@@ -1073,18 +759,23 @@ func makeStructCopyFunc(srcType, dstType reflect.Type, srcOffset, dstOffset uint
 // 通过预计算元素级转换函数（elemCopyFunc），将 reflect 循环转为 unsafe 指针循环
 //
 // 策略分层：
-//  1. 元素类型相同 → 已由 fieldSameType 处理（此函数不会收到）
-//  2. 元素类型可转换（integer/convertible）→ 生成类型特化的逐元素拷贝闭包
-//  3. 元素为结构体指针 → 使用缓存的 structFieldCache 做元素级快速转换
-//  4. 元素为指针（*T → *U）→ 生成元素级 convert+New 闭包
-//  5. 其他（无法优化）→ 返回 nil，走 reflect 慢路径
+//  1. 元素类型一致（两侧命名切片不互通）→ 整段 memmove
+//  2. 元素为整数类型 → 生成类型特化的逐元素拷贝闭包
+//  3. 元素类型可赋值/转换 → 布局一致整段 memmove，否则逐元素 Convert
+//  4. 元素为结构体指针 → 使用缓存的 structFieldCache 做元素级快速转换
+//  5. 元素为值结构体 → 使用缓存的 structFieldCache 做元素级快速转换
+//  6. 元素为值结构体 → 指针结构体 → 背板连续批量分配，元素级转换免逐个 New
+//  7. 元素为指针转换（*T → *U）→ 生成元素级 convert+New 闭包
+//  8. 元素为时间戳/wrapper 转换 → 逐元素 Convert
+//  9. 其他（无法优化）→ 返回 nil，走 reflect 慢路径
 //
 // Go 切片头布局（3 个 uintptr）：
 //
 //	type sliceHeader struct { Data unsafe.Pointer; Len int; Cap int }
 //
-// 通过 unsafe 读取源切片头部，再 reflect.MakeSlice 分配目标切片，
-// 最后通过 unsafe 指针算术逐元素调用 elemCopyFunc
+// 通过 unsafe 读取源切片头部分配目标切片，最后通过 unsafe 指针算术逐元素调用 elemCopyFunc
+// 目标切片分配：标量元素走泛型分配核 scalarSliceAlloc，其余回退 reflect.MakeSlice
+// 空切片头在构建期预计算，Len==0 直接写入零成本头，省去每次分配调用
 func makeSliceCopyFunc(srcType, dstType reflect.Type, srcOffset, dstOffset uintptr) fieldCopyFunc {
 	srcElemType := srcType.Elem()
 	dstElemType := dstType.Elem()
@@ -1092,28 +783,92 @@ func makeSliceCopyFunc(srcType, dstType reflect.Type, srcOffset, dstOffset uintp
 	// 分类元素类型，决定使用哪种转换策略
 	elemKind, _, _ := classifyField(srcElemType, dstElemType, true)
 
-	// 策略 1：元素为整数类型 → 生成特化的逐元素转换闭包
+	// 空切片头预计算：make(t, 0, 0) 数据指针为 zerobase，零容量不可写，跨实例共享安全
+	emptyVal := reflect.MakeSlice(dstType, 0, 0)
+	emptyHeader := sliceHeader{Data: emptyVal.UnsafePointer()}
+
+	// 标量元素分配核，未覆盖种类为 nil 时回退 reflect.MakeSlice
+	alloc := scalarSliceAlloc(dstElemType)
+
+	// newDstHeader 分配 n 容量的目标切片头，分配语义与 reflect.MakeSlice(dstType, n, n) 一致
+	newDstHeader := func(n int) sliceHeader {
+		if alloc != nil {
+			return alloc(n)
+		}
+		s := reflect.MakeSlice(dstType, n, n)
+		return sliceHeader{Data: s.UnsafePointer(), Len: n, Cap: n}
+	}
+
+	// makeMemmoveCopy 生成元素布局一致时的整段 memmove 拷贝体，策略 1/3 共用
+	makeMemmoveCopy := func(elemSize uintptr) fieldCopyFunc {
+		return func(srcBase, dstBase unsafe.Pointer) {
+			srcSlice := *(*sliceHeader)(addPtr(srcBase, srcOffset))
+			if srcSlice.Len == 0 {
+				*(*sliceHeader)(addPtr(dstBase, dstOffset)) = emptyHeader
+				return
+			}
+			dstHeader := newDstHeader(srcSlice.Len)
+			total := srcSlice.Len * int(elemSize)
+			copy((*[1 << 28]byte)(dstHeader.Data)[:total], (*[1 << 28]byte)(srcSlice.Data)[:total])
+			*(*sliceHeader)(addPtr(dstBase, dstOffset)) = dstHeader
+		}
+	}
+
+	// 策略 1：元素类型一致（两侧均为命名切片时切片级不互通，落入此处）
+	// 元素布局一致，分配新切片后整段一次 memmove，替代 reflect 慢路径
+	if elemKind == fieldSameType {
+		return makeMemmoveCopy(srcElemType.Size())
+	}
+
+	// 策略 2：元素为整数类型 → 构建期生成单态逐元素转换闭包
 	if elemKind == fieldInteger {
 		srcElemKind := srcElemType.Kind()
 		dstElemKind := dstElemType.Kind()
 		srcElemSize := srcElemType.Size()
 		dstElemSize := dstElemType.Size()
+		conv := intCopyFromSrc(srcElemKind, dstElemKind, 0, 0)
+		if conv == nil {
+			// 非标准整数种类回退宽度泛化实现，零偏移对即单元素转换
+			pure, _ := pureIntegerCopyGeneric(srcElemKind, dstElemKind)
+			conv = func(srcAddr, dstAddr unsafe.Pointer) {
+				pure(dstAddr, srcAddr, 0, 0)
+			}
+		}
 		return func(srcBase, dstBase unsafe.Pointer) {
 			srcSlice := *(*sliceHeader)(addPtr(srcBase, srcOffset))
 			if srcSlice.Len == 0 {
-				dstSlice := reflect.MakeSlice(dstType, 0, 0)
-				*(*sliceHeader)(addPtr(dstBase, dstOffset)) = sliceHeader{
-					Data: dstSlice.UnsafePointer(), Len: 0, Cap: 0,
-				}
+				*(*sliceHeader)(addPtr(dstBase, dstOffset)) = emptyHeader
+				return
+			}
+			dstHeader := newDstHeader(srcSlice.Len)
+			srcData := srcSlice.Data
+			dstData := dstHeader.Data
+			for i := 0; i < srcSlice.Len; i++ {
+				conv(addPtr(srcData, uintptr(i)*srcElemSize), addPtr(dstData, uintptr(i)*dstElemSize))
+			}
+			*(*sliceHeader)(addPtr(dstBase, dstOffset)) = dstHeader
+		}
+	}
+
+	// 策略 3：元素类型可直接赋值/转换 → 逐元素 Convert
+	if elemKind == fieldAssignable || elemKind == fieldConvertible {
+		srcElemSize := srcElemType.Size()
+		needConvert := srcElemType != dstElemType
+		if !needConvert {
+			// 元素布局一致，整段一次 memmove 替代逐元素循环
+			return makeMemmoveCopy(srcElemSize)
+		}
+		return func(srcBase, dstBase unsafe.Pointer) {
+			srcSlice := *(*sliceHeader)(addPtr(srcBase, srcOffset))
+			if srcSlice.Len == 0 {
+				*(*sliceHeader)(addPtr(dstBase, dstOffset)) = emptyHeader
 				return
 			}
 			dstSlice := reflect.MakeSlice(dstType, srcSlice.Len, srcSlice.Len)
 			srcData := srcSlice.Data
-			dstData := dstSlice.UnsafePointer()
 			for i := 0; i < srcSlice.Len; i++ {
-				srcAddr := addPtr(srcData, uintptr(i)*srcElemSize)
-				dstAddr := addPtr(dstData, uintptr(i)*dstElemSize)
-				convertIntegerValue(srcAddr, dstAddr, srcElemKind, dstElemKind)
+				srcElem := reflect.NewAt(srcElemType, addPtr(srcData, uintptr(i)*srcElemSize)).Elem()
+				dstSlice.Index(i).Set(srcElem.Convert(dstElemType))
 			}
 			*(*sliceHeader)(addPtr(dstBase, dstOffset)) = sliceHeader{
 				Data: dstSlice.UnsafePointer(), Len: srcSlice.Len, Cap: srcSlice.Len,
@@ -1121,73 +876,29 @@ func makeSliceCopyFunc(srcType, dstType reflect.Type, srcOffset, dstOffset uintp
 		}
 	}
 
-	// 策略 2：元素类型可直接赋值/转换 → 逐元素 Convert
-	if elemKind == fieldAssignable || elemKind == fieldConvertible {
-		srcElemSize := srcElemType.Size()
-		needConvert := srcElemType != dstElemType
-		return func(srcBase, dstBase unsafe.Pointer) {
-			srcSlice := *(*sliceHeader)(addPtr(srcBase, srcOffset))
-			if srcSlice.Len == 0 {
-				dstSlice := reflect.MakeSlice(dstType, 0, 0)
-				*(*sliceHeader)(addPtr(dstBase, dstOffset)) = sliceHeader{
-					Data: dstSlice.UnsafePointer(), Len: 0, Cap: 0,
-				}
-				return
-			}
-			dstSlice := reflect.MakeSlice(dstType, srcSlice.Len, srcSlice.Len)
-			if needConvert {
-				srcData := srcSlice.Data
-				for i := 0; i < srcSlice.Len; i++ {
-					srcElem := reflect.NewAt(srcElemType, addPtr(srcData, uintptr(i)*srcElemSize)).Elem()
-					dstSlice.Index(i).Set(srcElem.Convert(dstElemType))
-				}
-			} else {
-				srcData := srcSlice.Data
-				dstData := dstSlice.UnsafePointer()
-				elemSize := srcElemSize
-				for i := 0; i < srcSlice.Len; i++ {
-					srcAddr := addPtr(srcData, uintptr(i)*elemSize)
-					dstAddr := addPtr(dstData, uintptr(i)*elemSize)
-					copy((*[1 << 28]byte)(dstAddr)[:elemSize], (*[1 << 28]byte)(srcAddr)[:elemSize])
-				}
-			}
-			*(*sliceHeader)(addPtr(dstBase, dstOffset)) = sliceHeader{
-				Data: dstSlice.UnsafePointer(), Len: srcSlice.Len, Cap: srcSlice.Len,
-			}
-		}
-	}
-
-	// 策略 3：元素为 *Struct 指针 → 使用 structFieldCache 做元素级 unsafe 快速转换
+	// 策略 4：元素为 *Struct 指针 → 使用 structFieldCache 做元素级 unsafe 快速转换
 	// 优化：使用连续内存批量分配（backing slice），将 N+1 次分配减少到 2 次
 	if elemKind == fieldStructPtr {
 		srcInnerType := srcElemType.Elem()
 		dstInnerType := dstElemType.Elem()
 		dstInnerSize := dstInnerType.Size()
-		subCache, ok := globalStructFieldCache.Load(structFieldTypePair{srcInnerType, dstInnerType})
-		if !ok {
-			subCache = buildStructFieldCache(srcInnerType, dstInnerType, true)
-			globalStructFieldCache.Store(structFieldTypePair{srcInnerType, dstInnerType}, subCache)
-		}
-		sc := subCache
+		sc := loadStructFieldCache(srcInnerType, dstInnerType)
 		subMerged := sc.mergedFn
 		hasSlowEntries := len(sc.slowEntries) > 0
 		backingSliceType := reflect.SliceOf(dstInnerType)
 
-		if !hasSlowEntries && subMerged != nil {
+		if subMerged != nil {
 			return func(srcBase, dstBase unsafe.Pointer) {
 				srcSlice := *(*sliceHeader)(addPtr(srcBase, srcOffset))
 				if srcSlice.Len == 0 {
-					dstSlice := reflect.MakeSlice(dstType, 0, 0)
-					*(*sliceHeader)(addPtr(dstBase, dstOffset)) = sliceHeader{
-						Data: dstSlice.UnsafePointer(), Len: 0, Cap: 0,
-					}
+					*(*sliceHeader)(addPtr(dstBase, dstOffset)) = emptyHeader
 					return
 				}
 				// 批量分配：一次分配所有元素 + 一次分配指针切片
 				backing := reflect.MakeSlice(backingSliceType, srcSlice.Len, srcSlice.Len)
-				dstSlice := reflect.MakeSlice(dstType, srcSlice.Len, srcSlice.Len)
+				dstHeader := newDstHeader(srcSlice.Len)
 				srcData := srcSlice.Data
-				dstData := dstSlice.UnsafePointer()
+				dstData := dstHeader.Data
 				backingData := backing.UnsafePointer()
 				for i := 0; i < srcSlice.Len; i++ {
 					srcPtr := *(*unsafe.Pointer)(addPtr(srcData, uintptr(i)*PtrSize))
@@ -1198,117 +909,87 @@ func makeSliceCopyFunc(srcType, dstType reflect.Type, srcOffset, dstOffset uintp
 					// 直接在 backing slice 中定位元素地址，无需 reflect.New
 					dstElemPtr := addPtr(backingData, uintptr(i)*dstInnerSize)
 					subMerged(srcPtr, dstElemPtr)
+					if hasSlowEntries {
+						applyStructSlowEntriesUnsafe(srcPtr, dstElemPtr, sc)
+					}
 					*(*unsafe.Pointer)(addPtr(dstData, uintptr(i)*PtrSize)) = dstElemPtr
 				}
-				*(*sliceHeader)(addPtr(dstBase, dstOffset)) = sliceHeader{
-					Data: dstSlice.UnsafePointer(), Len: srcSlice.Len, Cap: srcSlice.Len,
-				}
-			}
-		}
-
-		if subMerged != nil {
-			return func(srcBase, dstBase unsafe.Pointer) {
-				srcSlice := *(*sliceHeader)(addPtr(srcBase, srcOffset))
-				if srcSlice.Len == 0 {
-					dstSlice := reflect.MakeSlice(dstType, 0, 0)
-					*(*sliceHeader)(addPtr(dstBase, dstOffset)) = sliceHeader{
-						Data: dstSlice.UnsafePointer(), Len: 0, Cap: 0,
-					}
-					return
-				}
-				backing := reflect.MakeSlice(backingSliceType, srcSlice.Len, srcSlice.Len)
-				dstSlice := reflect.MakeSlice(dstType, srcSlice.Len, srcSlice.Len)
-				srcData := srcSlice.Data
-				dstData := dstSlice.UnsafePointer()
-				backingData := backing.UnsafePointer()
-				for i := 0; i < srcSlice.Len; i++ {
-					srcPtr := *(*unsafe.Pointer)(addPtr(srcData, uintptr(i)*PtrSize))
-					if srcPtr == nil {
-						*(*unsafe.Pointer)(addPtr(dstData, uintptr(i)*PtrSize)) = nil
-						continue
-					}
-					dstElemPtr := addPtr(backingData, uintptr(i)*dstInnerSize)
-					subMerged(srcPtr, dstElemPtr)
-					applyStructSlowEntriesUnsafe(srcPtr, dstElemPtr, sc)
-					*(*unsafe.Pointer)(addPtr(dstData, uintptr(i)*PtrSize)) = dstElemPtr
-				}
-				*(*sliceHeader)(addPtr(dstBase, dstOffset)) = sliceHeader{
-					Data: dstSlice.UnsafePointer(), Len: srcSlice.Len, Cap: srcSlice.Len,
-				}
+				*(*sliceHeader)(addPtr(dstBase, dstOffset)) = dstHeader
 			}
 		}
 
 		return nil
 	}
 
-	// 策略 4：元素为值结构体 → 使用 structFieldCache 做元素级 unsafe 快速转换
+	// 策略 5：元素为值结构体 → 使用 structFieldCache 做元素级 unsafe 快速转换
 	if elemKind == fieldStruct {
-		subCache, ok := globalStructFieldCache.Load(structFieldTypePair{srcElemType, dstElemType})
-		if !ok {
-			subCache = buildStructFieldCache(srcElemType, dstElemType, true)
-			globalStructFieldCache.Store(structFieldTypePair{srcElemType, dstElemType}, subCache)
-		}
-		sc := subCache
+		sc := loadStructFieldCache(srcElemType, dstElemType)
 		subMerged := sc.mergedFn
 		hasSlowEntries := len(sc.slowEntries) > 0
 
-		if !hasSlowEntries && subMerged != nil {
-			return func(srcBase, dstBase unsafe.Pointer) {
-				srcSlice := *(*sliceHeader)(addPtr(srcBase, srcOffset))
-				if srcSlice.Len == 0 {
-					dstSlice := reflect.MakeSlice(dstType, 0, 0)
-					*(*sliceHeader)(addPtr(dstBase, dstOffset)) = sliceHeader{
-						Data: dstSlice.UnsafePointer(), Len: 0, Cap: 0,
-					}
-					return
-				}
-				dstSlice := reflect.MakeSlice(dstType, srcSlice.Len, srcSlice.Len)
-				srcData := srcSlice.Data
-				dstData := dstSlice.UnsafePointer()
-				srcElemSize := srcElemType.Size()
-				dstElemSize := dstElemType.Size()
-				for i := 0; i < srcSlice.Len; i++ {
-					srcElemPtr := addPtr(srcData, uintptr(i)*srcElemSize)
-					dstElemPtr := addPtr(dstData, uintptr(i)*dstElemSize)
-					subMerged(srcElemPtr, dstElemPtr)
-				}
-				*(*sliceHeader)(addPtr(dstBase, dstOffset)) = sliceHeader{
-					Data: dstSlice.UnsafePointer(), Len: srcSlice.Len, Cap: srcSlice.Len,
-				}
-			}
-		}
-
 		if subMerged != nil {
+			srcElemSize := srcElemType.Size()
+			dstElemSize := dstElemType.Size()
 			return func(srcBase, dstBase unsafe.Pointer) {
 				srcSlice := *(*sliceHeader)(addPtr(srcBase, srcOffset))
 				if srcSlice.Len == 0 {
-					dstSlice := reflect.MakeSlice(dstType, 0, 0)
-					*(*sliceHeader)(addPtr(dstBase, dstOffset)) = sliceHeader{
-						Data: dstSlice.UnsafePointer(), Len: 0, Cap: 0,
-					}
+					*(*sliceHeader)(addPtr(dstBase, dstOffset)) = emptyHeader
 					return
 				}
-				dstSlice := reflect.MakeSlice(dstType, srcSlice.Len, srcSlice.Len)
+				dstHeader := newDstHeader(srcSlice.Len)
 				srcData := srcSlice.Data
-				dstData := dstSlice.UnsafePointer()
-				srcElemSize := srcElemType.Size()
-				dstElemSize := dstElemType.Size()
+				dstData := dstHeader.Data
 				for i := 0; i < srcSlice.Len; i++ {
 					srcElemPtr := addPtr(srcData, uintptr(i)*srcElemSize)
 					dstElemPtr := addPtr(dstData, uintptr(i)*dstElemSize)
 					subMerged(srcElemPtr, dstElemPtr)
-					applyStructSlowEntriesUnsafe(srcElemPtr, dstElemPtr, sc)
+					if hasSlowEntries {
+						applyStructSlowEntriesUnsafe(srcElemPtr, dstElemPtr, sc)
+					}
 				}
-				*(*sliceHeader)(addPtr(dstBase, dstOffset)) = sliceHeader{
-					Data: dstSlice.UnsafePointer(), Len: srcSlice.Len, Cap: srcSlice.Len,
-				}
+				*(*sliceHeader)(addPtr(dstBase, dstOffset)) = dstHeader
 			}
 		}
 
 		return nil
 	}
 
-	// 策略 5：元素为 *T → *U（T→U 有快速的 toPtr/fromPtr 等转换路径）
+	// 策略 6：元素为值结构体 → 指针结构体（[]Struct → []*StructPB）
+	// 背板连续批量分配：值元素转换写入背板后取址，替代逐元素 reflect.New 分配
+	// 有 slow entries 的子缓存回退策略 7 的逐元素路径，保证慢字段语义完整
+	if elemKind == fieldToPtr && srcElemType.Kind() == reflect.Struct &&
+		dstElemType.Kind() == reflect.Ptr && dstElemType.Elem().Kind() == reflect.Struct {
+		dstInnerType := dstElemType.Elem()
+		dstInnerSize := dstInnerType.Size()
+		srcElemSize := srcElemType.Size()
+		sc := loadStructFieldCache(srcElemType, dstInnerType)
+		subMerged := sc.mergedFn
+
+		if subMerged != nil && len(sc.slowEntries) == 0 {
+			backingSliceType := reflect.SliceOf(dstInnerType)
+			return func(srcBase, dstBase unsafe.Pointer) {
+				srcSlice := *(*sliceHeader)(addPtr(srcBase, srcOffset))
+				if srcSlice.Len == 0 {
+					*(*sliceHeader)(addPtr(dstBase, dstOffset)) = emptyHeader
+					return
+				}
+				backing := reflect.MakeSlice(backingSliceType, srcSlice.Len, srcSlice.Len)
+				dstHeader := newDstHeader(srcSlice.Len)
+				srcData := srcSlice.Data
+				dstData := dstHeader.Data
+				backingData := backing.UnsafePointer()
+				for i := 0; i < srcSlice.Len; i++ {
+					srcElemPtr := addPtr(srcData, uintptr(i)*srcElemSize)
+					dstElemPtr := addPtr(backingData, uintptr(i)*dstInnerSize)
+					subMerged(srcElemPtr, dstElemPtr)
+					*(*unsafe.Pointer)(addPtr(dstData, uintptr(i)*PtrSize)) = dstElemPtr
+				}
+				*(*sliceHeader)(addPtr(dstBase, dstOffset)) = dstHeader
+			}
+		}
+	}
+
+	// 策略 7：元素为指针转换（*T → *U，含值→指针、指针→值），生成元素级 convert+New 闭包
 	if elemKind == fieldToPtr || elemKind == fieldFromPtr {
 		elemCopyFn := makeFieldCopyFunc(elemKind, srcElemType, dstElemType, 0, 0, nil, 0)
 		if elemCopyFn == nil {
@@ -1319,37 +1000,29 @@ func makeSliceCopyFunc(srcType, dstType reflect.Type, srcOffset, dstOffset uintp
 		return func(srcBase, dstBase unsafe.Pointer) {
 			srcSlice := *(*sliceHeader)(addPtr(srcBase, srcOffset))
 			if srcSlice.Len == 0 {
-				dstSlice := reflect.MakeSlice(dstType, 0, 0)
-				*(*sliceHeader)(addPtr(dstBase, dstOffset)) = sliceHeader{
-					Data: dstSlice.UnsafePointer(), Len: 0, Cap: 0,
-				}
+				*(*sliceHeader)(addPtr(dstBase, dstOffset)) = emptyHeader
 				return
 			}
-			dstSlice := reflect.MakeSlice(dstType, srcSlice.Len, srcSlice.Len)
+			dstHeader := newDstHeader(srcSlice.Len)
 			srcData := srcSlice.Data
-			dstData := dstSlice.UnsafePointer()
+			dstData := dstHeader.Data
 			for i := 0; i < srcSlice.Len; i++ {
 				srcElemPtr := addPtr(srcData, uintptr(i)*srcElemSize)
 				dstElemPtr := addPtr(dstData, uintptr(i)*dstElemSize)
 				elemCopyFn(srcElemPtr, dstElemPtr)
 			}
-			*(*sliceHeader)(addPtr(dstBase, dstOffset)) = sliceHeader{
-				Data: dstSlice.UnsafePointer(), Len: srcSlice.Len, Cap: srcSlice.Len,
-			}
+			*(*sliceHeader)(addPtr(dstBase, dstOffset)) = dstHeader
 		}
 	}
 
-	// 策略 6：时间戳→时间、时间→时间戳等元素转换
+	// 策略 8：时间戳→时间、时间→时间戳等元素转换
 	if elemKind == fieldTSToTime || elemKind == fieldTimeToTS || elemKind == fieldWrapper {
 		srcElemSize := srcElemType.Size()
 		dstElemSize := dstElemType.Size()
 		return func(srcBase, dstBase unsafe.Pointer) {
 			srcSlice := *(*sliceHeader)(addPtr(srcBase, srcOffset))
 			if srcSlice.Len == 0 {
-				dstSlice := reflect.MakeSlice(dstType, 0, 0)
-				*(*sliceHeader)(addPtr(dstBase, dstOffset)) = sliceHeader{
-					Data: dstSlice.UnsafePointer(), Len: 0, Cap: 0,
-				}
+				*(*sliceHeader)(addPtr(dstBase, dstOffset)) = emptyHeader
 				return
 			}
 			dstSlice := reflect.MakeSlice(dstType, srcSlice.Len, srcSlice.Len)
@@ -1425,12 +1098,7 @@ func makeMapCopyFunc(srcType, dstType reflect.Type, srcOffset, dstOffset uintptr
 
 	// 策略 3：key 相同 + value 为结构体 → 使用 structFieldCache
 	if keySame && srcValType.Kind() == reflect.Struct && dstValType.Kind() == reflect.Struct {
-		subCache, ok := globalStructFieldCache.Load(structFieldTypePair{srcValType, dstValType})
-		if !ok {
-			subCache = buildStructFieldCache(srcValType, dstValType, true)
-			globalStructFieldCache.Store(structFieldTypePair{srcValType, dstValType}, subCache)
-		}
-		sc := subCache
+		sc := loadStructFieldCache(srcValType, dstValType)
 		subMerged := sc.mergedFn
 		needSubConvert := len(sc.slowEntries) > 0
 
@@ -1471,160 +1139,6 @@ func makeMapCopyFunc(srcType, dstType reflect.Type, srcOffset, dstOffset uintptr
 	}
 
 	return nil
-}
-
-// convertIntegerValue 通过 unsafe 指针完成整数类型转换
-// 由 makeSliceCopyFunc 调用，在逐元素循环中替代 reflect.Convert
-// 支持所有整数类型组合：int/int8/int16/int32/int64/uint/uint8/uint16/uint32/uint64
-func convertIntegerValue(srcAddr, dstAddr unsafe.Pointer, srcKind, dstKind reflect.Kind) {
-	switch srcKind {
-	case reflect.Int32:
-		v := int32(*(*int32)(srcAddr))
-		switch dstKind {
-		case reflect.Int:
-			*(*int)(dstAddr) = int(v)
-		case reflect.Int64:
-			*(*int64)(dstAddr) = int64(v)
-		case reflect.Int16:
-			*(*int16)(dstAddr) = int16(v)
-		case reflect.Int8:
-			*(*int8)(dstAddr) = int8(v)
-		case reflect.Uint:
-			*(*uint)(dstAddr) = uint(v)
-		case reflect.Uint32:
-			*(*uint32)(dstAddr) = uint32(v)
-		case reflect.Uint64:
-			*(*uint64)(dstAddr) = uint64(v)
-		case reflect.Uint16:
-			*(*uint16)(dstAddr) = uint16(v)
-		case reflect.Uint8:
-			*(*uint8)(dstAddr) = uint8(v)
-		}
-	case reflect.Int64:
-		v := int64(*(*int64)(srcAddr))
-		switch dstKind {
-		case reflect.Int:
-			*(*int)(dstAddr) = int(v)
-		case reflect.Int32:
-			*(*int32)(dstAddr) = int32(v)
-		case reflect.Int16:
-			*(*int16)(dstAddr) = int16(v)
-		case reflect.Int8:
-			*(*int8)(dstAddr) = int8(v)
-		case reflect.Uint:
-			*(*uint)(dstAddr) = uint(v)
-		case reflect.Uint32:
-			*(*uint32)(dstAddr) = uint32(v)
-		case reflect.Uint64:
-			*(*uint64)(dstAddr) = uint64(v)
-		case reflect.Uint16:
-			*(*uint16)(dstAddr) = uint16(v)
-		case reflect.Uint8:
-			*(*uint8)(dstAddr) = uint8(v)
-		}
-	case reflect.Int:
-		v := int(*(*int)(srcAddr))
-		switch dstKind {
-		case reflect.Int32:
-			*(*int32)(dstAddr) = int32(v)
-		case reflect.Int64:
-			*(*int64)(dstAddr) = int64(v)
-		case reflect.Int16:
-			*(*int16)(dstAddr) = int16(v)
-		case reflect.Int8:
-			*(*int8)(dstAddr) = int8(v)
-		case reflect.Uint:
-			*(*uint)(dstAddr) = uint(v)
-		case reflect.Uint32:
-			*(*uint32)(dstAddr) = uint32(v)
-		case reflect.Uint64:
-			*(*uint64)(dstAddr) = uint64(v)
-		case reflect.Uint16:
-			*(*uint16)(dstAddr) = uint16(v)
-		case reflect.Uint8:
-			*(*uint8)(dstAddr) = uint8(v)
-		}
-	case reflect.Uint32:
-		v := uint32(*(*uint32)(srcAddr))
-		switch dstKind {
-		case reflect.Uint:
-			*(*uint)(dstAddr) = uint(v)
-		case reflect.Uint64:
-			*(*uint64)(dstAddr) = uint64(v)
-		case reflect.Uint16:
-			*(*uint16)(dstAddr) = uint16(v)
-		case reflect.Uint8:
-			*(*uint8)(dstAddr) = uint8(v)
-		case reflect.Int:
-			*(*int)(dstAddr) = int(v)
-		case reflect.Int32:
-			*(*int32)(dstAddr) = int32(v)
-		case reflect.Int64:
-			*(*int64)(dstAddr) = int64(v)
-		}
-	case reflect.Uint64:
-		v := uint64(*(*uint64)(srcAddr))
-		switch dstKind {
-		case reflect.Uint:
-			*(*uint)(dstAddr) = uint(v)
-		case reflect.Uint32:
-			*(*uint32)(dstAddr) = uint32(v)
-		case reflect.Int:
-			*(*int)(dstAddr) = int(v)
-		case reflect.Int32:
-			*(*int32)(dstAddr) = int32(v)
-		case reflect.Int64:
-			*(*int64)(dstAddr) = int64(v)
-		}
-	case reflect.Uint:
-		v := uint(*(*uint)(srcAddr))
-		switch dstKind {
-		case reflect.Uint32:
-			*(*uint32)(dstAddr) = uint32(v)
-		case reflect.Uint64:
-			*(*uint64)(dstAddr) = uint64(v)
-		case reflect.Int:
-			*(*int)(dstAddr) = int(v)
-		case reflect.Int32:
-			*(*int32)(dstAddr) = int32(v)
-		case reflect.Int64:
-			*(*int64)(dstAddr) = int64(v)
-		}
-	case reflect.Int16:
-		v := int16(*(*int16)(srcAddr))
-		switch dstKind {
-		case reflect.Int:
-			*(*int)(dstAddr) = int(v)
-		case reflect.Int32:
-			*(*int32)(dstAddr) = int32(v)
-		case reflect.Int64:
-			*(*int64)(dstAddr) = int64(v)
-		}
-	case reflect.Int8:
-		v := int8(*(*int8)(srcAddr))
-		switch dstKind {
-		case reflect.Int:
-			*(*int)(dstAddr) = int(v)
-		case reflect.Int32:
-			*(*int32)(dstAddr) = int32(v)
-		}
-	case reflect.Uint16:
-		v := uint16(*(*uint16)(srcAddr))
-		switch dstKind {
-		case reflect.Uint32:
-			*(*uint32)(dstAddr) = uint32(v)
-		case reflect.Int32:
-			*(*int32)(dstAddr) = int32(v)
-		}
-	case reflect.Uint8:
-		v := uint8(*(*uint8)(srcAddr))
-		switch dstKind {
-		case reflect.Uint32:
-			*(*uint32)(dstAddr) = uint32(v)
-		case reflect.Int32:
-			*(*int32)(dstAddr) = int32(v)
-		}
-	}
 }
 
 // PtrSize 是 unsafe.Sizeof(unsafe.Pointer(nil)) 的常量，用于指针算术
@@ -1885,32 +1399,17 @@ func makeToPtrCopyFunc(srcType, dstType reflect.Type, srcOffset, dstOffset uintp
 
 	// Case 2: Different struct types (StructA → *StructB)，使用 structFieldCache
 	if srcType.Kind() == reflect.Struct && elemType.Kind() == reflect.Struct {
-		subCache, ok := globalStructFieldCache.Load(structFieldTypePair{srcType, elemType})
-		if !ok {
-			subCache = buildStructFieldCache(srcType, elemType, true)
-			globalStructFieldCache.Store(structFieldTypePair{srcType, elemType}, subCache)
-		}
-		sc := subCache
+		sc := loadStructFieldCache(srcType, elemType)
 		subMerged := sc.mergedFn
-		needSubConvert := len(sc.slowEntries) > 0
-
-		if !needSubConvert && subMerged != nil {
-			return func(srcBase, dstBase unsafe.Pointer) {
-				srcAddr := addPtr(srcBase, srcOffset)
-				dstPtrVal := reflect.New(elemType)
-				dstPtr := dstPtrVal.UnsafePointer()
-				subMerged(srcAddr, dstPtr)
-				*(*unsafe.Pointer)(addPtr(dstBase, dstOffset)) = dstPtr
-			}
-		}
-
 		if subMerged != nil {
+			hasSlowEntries := len(sc.slowEntries) > 0
 			return func(srcBase, dstBase unsafe.Pointer) {
 				srcAddr := addPtr(srcBase, srcOffset)
-				dstPtrVal := reflect.New(elemType)
-				dstPtr := dstPtrVal.UnsafePointer()
+				dstPtr := reflect.New(elemType).UnsafePointer()
 				subMerged(srcAddr, dstPtr)
-				applyStructSlowEntriesUnsafe(srcAddr, dstPtr, sc)
+				if hasSlowEntries {
+					applyStructSlowEntriesUnsafe(srcAddr, dstPtr, sc)
+				}
 				*(*unsafe.Pointer)(addPtr(dstBase, dstOffset)) = dstPtr
 			}
 		}
@@ -1940,27 +1439,10 @@ func makeFromPtrCopyFunc(srcType, dstType reflect.Type, srcOffset, dstOffset uin
 
 	// Case 2: Different struct types (*StructA → StructB)，使用 structFieldCache
 	if elemType.Kind() == reflect.Struct && dstType.Kind() == reflect.Struct {
-		subCache, ok := globalStructFieldCache.Load(structFieldTypePair{elemType, dstType})
-		if !ok {
-			subCache = buildStructFieldCache(elemType, dstType, true)
-			globalStructFieldCache.Store(structFieldTypePair{elemType, dstType}, subCache)
-		}
-		sc := subCache
+		sc := loadStructFieldCache(elemType, dstType)
 		subMerged := sc.mergedFn
-		needSubConvert := len(sc.slowEntries) > 0
-
-		if !needSubConvert && subMerged != nil {
-			return func(srcBase, dstBase unsafe.Pointer) {
-				srcPtr := *(*unsafe.Pointer)(addPtr(srcBase, srcOffset))
-				if srcPtr == nil {
-					return
-				}
-				dstAddr := addPtr(dstBase, dstOffset)
-				subMerged(srcPtr, dstAddr)
-			}
-		}
-
 		if subMerged != nil {
+			hasSlowEntries := len(sc.slowEntries) > 0
 			return func(srcBase, dstBase unsafe.Pointer) {
 				srcPtr := *(*unsafe.Pointer)(addPtr(srcBase, srcOffset))
 				if srcPtr == nil {
@@ -1968,7 +1450,9 @@ func makeFromPtrCopyFunc(srcType, dstType reflect.Type, srcOffset, dstOffset uin
 				}
 				dstAddr := addPtr(dstBase, dstOffset)
 				subMerged(srcPtr, dstAddr)
-				applyStructSlowEntriesUnsafe(srcPtr, dstAddr, sc)
+				if hasSlowEntries {
+					applyStructSlowEntriesUnsafe(srcPtr, dstAddr, sc)
+				}
 			}
 		}
 	}
@@ -2586,7 +2070,6 @@ type BidiConverter struct {
 	pbToModelPtr   atomic.Pointer[fieldCache]
 	modelToPBPtr   atomic.Pointer[fieldCache]
 	mu             sync.RWMutex
-	gen            atomic.Uint64 // 缓存代数，invalidateCache 时递增，热路径条目据此感知失效
 }
 
 // NewBidiConverter 创建双向转换器
@@ -2716,7 +2199,9 @@ func (bc *BidiConverter) GetTransformers() *TransformerRegistry {
 	return bc.transformers
 }
 
-// invalidateCache 清空缓存并递增代数，热路径条目据此感知失效
+// invalidateCache 清空内部缓存与全局热路径槽位
+// 槽位无条件清空使热路径免代数检查，被误清的其他类型对下次调用回源重建
+// 仅配置变更时触发，32 次原子写开销可忽略
 func (bc *BidiConverter) invalidateCache() {
 	bc.mu.Lock()
 	bc.pbToModelCache = nil
@@ -2724,7 +2209,9 @@ func (bc *BidiConverter) invalidateCache() {
 	bc.pbToModelPtr.Store(nil)
 	bc.modelToPBPtr.Store(nil)
 	bc.mu.Unlock()
-	bc.gen.Add(1)
+	for i := range lastEntries {
+		lastEntries[i].entry.Store(nil)
+	}
 }
 
 // fieldCaches 获取双向字段缓存，均已就绪时零加锁返回

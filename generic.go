@@ -40,17 +40,21 @@ var lastEntries [entrySlotCount]entrySlot
 
 // cachedConverter 转换器热路径缓存条目
 // 一次原子读同时取得转换器与双向字段缓存，稳态零分配
-// gen 记录构建时的缓存代数，与转换器当前代数不一致时回源刷新
+// 槽位由 invalidateCache 全量清空感知失效，热路径免代数检查
+// 两侧纯拷贝标志与合并闭包预烘焙，热路径免查 slowEntries 直接分发
 type cachedConverter struct {
 	key       fastKey
 	converter *BidiConverter
-	gen       uint64
 	pbToModel *fieldCache
 	modelToPB *fieldCache
+	pbMerged  func(srcBase, dstBase unsafe.Pointer)
+	mMerged   func(srcBase, dstBase unsafe.Pointer)
+	pbPure    bool
+	mPure     bool
 }
 
-// fastKey 热路径槽位 key，取类型对底层 rtype 数据指针组合
-// reflect.Type 底层 *rtype 指针唯一标识类型，等值比较退化为两次纯指针比较
+// fastKey 热路径槽位 key，取类型对指针描述符地址组合
+// 指针类型描述符全局唯一，等值比较退化为两次纯指针比较
 // 避免 typePair 接口等值比较引入的 ifaceeq 间接调用开销
 type fastKey struct {
 	model uintptr
@@ -73,61 +77,82 @@ func slotIndexOf(mk, pk uintptr) int {
 	return int((h ^ (h >> 29)) & (entrySlotCount - 1))
 }
 
-// fastKeyOf 提取类型对的 rtype 指针、规范 typePair 与槽位下标
-// 哈希与 key 构造共用一次接口数据字提取，热路径零多余反射调用
-func fastKeyOf[M any, P any]() (fastKey, typePair, int) {
-	mt := derefType(reflect.TypeFor[M]())
-	pt := derefType(reflect.TypeFor[P]())
-	mk := uintptr(ifaceDataPtr(mt))
-	pk := uintptr(ifaceDataPtr(pt))
-	return fastKey{mk, pk}, typePair{mt, pt}, slotIndexOf(mk, pk)
+// typeWordOf 提取 T 指针类型描述符地址
+// nil 指针装箱仅写静态类型字与零数据字，类型字为链接期确定的只读静态地址
+// 热路径内联为单次常量加载，取代 reflect.TypeFor 的反射调用链
+func typeWordOf[T any]() uintptr {
+	var e any = (*T)(nil)
+	type ifaceHeader struct {
+		Type unsafe.Pointer
+		_    unsafe.Pointer
+	}
+	return uintptr((*ifaceHeader)(unsafe.Pointer(&e)).Type)
+}
+
+// typePairOf 规范类型对，冷路径专用
+func typePairOf[M any, P any]() typePair {
+	return typePair{derefType(reflect.TypeFor[M]()), derefType(reflect.TypeFor[P]())}
 }
 
 // newCachedConverter 确保字段缓存已构建并生成热路径条目
+// 预判两侧纯拷贝可走性并烘焙合并闭包，热路径免查 slowEntries
 func newCachedConverter(key fastKey, c *BidiConverter) *cachedConverter {
 	pbToModel, modelToPB := c.fieldCaches()
 	return &cachedConverter{
 		key:       key,
 		converter: c,
-		gen:       c.gen.Load(),
 		pbToModel: pbToModel,
 		modelToPB: modelToPB,
+		pbMerged:  pbToModel.mergedCopyFunc,
+		mMerged:   modelToPB.mergedCopyFunc,
+		pbPure:    pbToModel.mergedCopyFunc != nil && len(pbToModel.slowEntries) == 0,
+		mPure:     modelToPB.mergedCopyFunc != nil && len(modelToPB.slowEntries) == 0,
 	}
 }
 
-// getOrInitCachedConverter 获取或初始化热路径缓存条目
-// 命中槽位仅一次原子读；未命中从 converterCache 取转换器后重建条目
-func getOrInitCachedConverter[M any, P any]() *cachedConverter {
-	key, tp, idx := fastKeyOf[M, P]()
-	slot := &lastEntries[idx]
-	if e := slot.entry.Load(); e != nil && e.key == key && e.gen == e.converter.gen.Load() {
-		return e
-	}
+// ensureEntry 回源 converterCache 构建热路径条目并写入槽位，冷路径专用
+// 槽位未命中或被 invalidateCache 清空后调用，并发重复构建引用同一转换器幂等无害
+func ensureEntry[M any, P any](mk, pk uintptr) *cachedConverter {
+	tp := typePairOf[M, P]()
 	var c *BidiConverter
 	if v, ok := converterCache.Load(tp); ok {
 		c = v.(*BidiConverter)
 	} else {
-		actual, _ := converterCache.LoadOrStore(tp, NewBidiConverter(new(P), new(M)).WithAutoTimeConversion(true))
+		actual, _ := converterCache.LoadOrStore(tp,
+			NewBidiConverter(new(P), new(M)).WithAutoTimeConversion(true))
 		c = actual.(*BidiConverter)
 	}
-	e := newCachedConverter(key, c)
-	slot.entry.Store(e)
+	e := newCachedConverter(fastKey{mk, pk}, c)
+	lastEntries[slotIndexOf(mk, pk)].entry.Store(e)
 	return e
 }
 
+// loadEntry 确保类型对的热路径缓存条目就绪，批量入口的单次查找点
+// 命中仅一次原子读，未命中或被清空回源重建
+func loadEntry[M any, P any]() *cachedConverter {
+	mk := typeWordOf[M]()
+	pk := typeWordOf[P]()
+	if e := lastEntries[slotIndexOf(mk, pk)].entry.Load(); e != nil &&
+		e.key.model == mk && e.key.pb == pk {
+		return e
+	}
+	return ensureEntry[M, P](mk, pk)
+}
+
 // lookupCachedConverter 按运行时元素类型查找热路径缓存条目
-// 槽位命中零装箱；未命中回源 converterCache，仍无则返回 nil 不创建
+// key 与 typeWordOf 同源：modelType 经 PointerTo 规范为指针描述符，槽位命中零装箱
+// 未命中回源 converterCache，仍无则返回 nil 不创建
 // 用于元素类型与类型参数不一致的批量入口（如 SafeToPBs 的指针切片）
 func lookupCachedConverter[P any](modelType reflect.Type) *cachedConverter {
-	pt := reflect.TypeFor[P]()
-	key := fastKey{uintptr(ifaceDataPtr(modelType)), uintptr(ifaceDataPtr(pt))}
-	idx := slotIndexOf(key.model, key.pb)
-	slot := &lastEntries[idx]
-	if e := slot.entry.Load(); e != nil && e.key == key && e.gen == e.converter.gen.Load() {
+	mk := uintptr(ifaceDataPtr(reflect.PointerTo(modelType)))
+	pk := typeWordOf[P]()
+	key := fastKey{mk, pk}
+	slot := &lastEntries[slotIndexOf(mk, pk)]
+	if e := slot.entry.Load(); e != nil && e.key == key {
 		return e
 	}
 	var c *BidiConverter
-	if v, ok := converterCache.Load(typePair{modelType, pt}); ok {
+	if v, ok := converterCache.Load(typePair{modelType, derefType(reflect.TypeFor[P]())}); ok {
 		c = v.(*BidiConverter)
 	} else {
 		return nil
@@ -139,7 +164,7 @@ func lookupCachedConverter[P any](modelType reflect.Type) *cachedConverter {
 
 // getOrInitConverter 获取或初始化转换器
 func getOrInitConverter[M any, P any]() *BidiConverter {
-	return getOrInitCachedConverter[M, P]().converter
+	return loadEntry[M, P]().converter
 }
 
 // Register[M, P] 注册 Model-PB 转换对（使用默认配置）
@@ -149,41 +174,52 @@ func Register[M any, P any]() *BidiConverter {
 
 // RegisterWith[M, P] 注册 Model-PB 转换对（自定义配置）
 func RegisterWith[M any, P any](opts ...Option) *BidiConverter {
-	key, tp, idx := fastKeyOf[M, P]()
+	mk := typeWordOf[M]()
+	pk := typeWordOf[P]()
 	c := NewBidiConverter(new(P), new(M), opts...)
-	converterCache.Store(tp, c)
-	lastEntries[idx].entry.Store(newCachedConverter(key, c))
+	converterCache.Store(typePairOf[M, P](), c)
+	lastEntries[slotIndexOf(mk, pk)].entry.Store(newCachedConverter(fastKey{mk, pk}, c))
 	return c
 }
 
 // ToPB 将 Model 转换为 PB 消息，nil 输入返回 nil
+// 类型字静态提取一次原子读命中即分发，纯拷贝直达合并闭包，稳态零反射
 func ToPB[M any, P any](m *M) (*P, error) {
 	if m == nil {
 		return nil, nil
 	}
-	e := getOrInitCachedConverter[M, P]()
-	cache := e.modelToPB
+	mk := typeWordOf[M]()
+	pk := typeWordOf[P]()
+	e := lastEntries[slotIndexOf(mk, pk)].entry.Load()
+	if e == nil || e.key.model != mk || e.key.pb != pk {
+		e = ensureEntry[M, P](mk, pk)
+	}
 	info := new(P)
-	if cache.mergedCopyFunc != nil && len(cache.slowEntries) == 0 {
-		cache.mergedCopyFunc(unsafe.Pointer(m), unsafe.Pointer(info))
+	if e.mPure {
+		e.mMerged(unsafe.Pointer(m), unsafe.Pointer(info))
 		return info, nil
 	}
-	return info, e.converter.convertModelToPBPtrCached(unsafe.Pointer(m), unsafe.Pointer(info), cache)
+	return info, e.converter.convertPtrCached(unsafe.Pointer(m), unsafe.Pointer(info), e.modelToPB)
 }
 
 // FromPB 将 PB 消息转换为 Model，nil 输入返回 nil
+// 类型字静态提取一次原子读命中即分发，纯拷贝直达合并闭包，稳态零反射
 func FromPB[P any, M any](pb *P) (*M, error) {
 	if pb == nil {
 		return nil, nil
 	}
-	e := getOrInitCachedConverter[M, P]()
-	cache := e.pbToModel
+	mk := typeWordOf[M]()
+	pk := typeWordOf[P]()
+	e := lastEntries[slotIndexOf(mk, pk)].entry.Load()
+	if e == nil || e.key.model != mk || e.key.pb != pk {
+		e = ensureEntry[M, P](mk, pk)
+	}
 	model := new(M)
-	if cache.mergedCopyFunc != nil && len(cache.slowEntries) == 0 {
-		cache.mergedCopyFunc(unsafe.Pointer(pb), unsafe.Pointer(model))
+	if e.pbPure {
+		e.pbMerged(unsafe.Pointer(pb), unsafe.Pointer(model))
 		return model, nil
 	}
-	return model, e.converter.convertPBToModelPtrCached(unsafe.Pointer(pb), unsafe.Pointer(model), cache)
+	return model, e.converter.convertPtrCached(unsafe.Pointer(pb), unsafe.Pointer(model), e.pbToModel)
 }
 
 // ToPBs 批量将 Model 指针切片转换为 PB 切片
@@ -192,14 +228,13 @@ func ToPBs[M any, P any](models []*M) ([]*P, error) {
 	if len(models) == 0 {
 		return pbs, nil
 	}
-	e := getOrInitCachedConverter[M, P]()
-	cache := e.modelToPB
+	e := loadEntry[M, P]()
 	values := make([]P, len(models))
-	if cache.mergedCopyFunc != nil && len(cache.slowEntries) == 0 {
+	if e.mPure {
 		for i, m := range models {
 			p := &values[i]
 			if m != nil {
-				cache.mergedCopyFunc(unsafe.Pointer(m), unsafe.Pointer(p))
+				e.mMerged(unsafe.Pointer(m), unsafe.Pointer(p))
 			}
 			pbs[i] = p
 		}
@@ -207,7 +242,7 @@ func ToPBs[M any, P any](models []*M) ([]*P, error) {
 	}
 	for i, m := range models {
 		p := &values[i]
-		if err := e.converter.convertModelToPBPtrCached(unsafe.Pointer(m), unsafe.Pointer(p), cache); err != nil {
+		if err := e.converter.convertPtrCached(unsafe.Pointer(m), unsafe.Pointer(p), e.modelToPB); err != nil {
 			return nil, NewBatchError("元素 %d: %v", i, err)
 		}
 		pbs[i] = p
@@ -222,14 +257,13 @@ func FromPBs[P any, M any](pbs []*P) ([]*M, error) {
 	if len(pbs) == 0 {
 		return models, nil
 	}
-	e := getOrInitCachedConverter[M, P]()
-	cache := e.pbToModel
+	e := loadEntry[M, P]()
 	values := make([]M, len(pbs))
-	if cache.mergedCopyFunc != nil && len(cache.slowEntries) == 0 {
+	if e.pbPure {
 		for i, pb := range pbs {
 			m := &values[i]
 			if pb != nil {
-				cache.mergedCopyFunc(unsafe.Pointer(pb), unsafe.Pointer(m))
+				e.pbMerged(unsafe.Pointer(pb), unsafe.Pointer(m))
 			}
 			models[i] = m
 		}
@@ -241,12 +275,43 @@ func FromPBs[P any, M any](pbs []*P) ([]*M, error) {
 			models[i] = m
 			continue
 		}
-		if err := e.converter.convertPBToModelPtrCached(unsafe.Pointer(pb), unsafe.Pointer(m), cache); err != nil {
+		if err := e.converter.convertPtrCached(unsafe.Pointer(pb), unsafe.Pointer(m), e.pbToModel); err != nil {
 			return nil, NewBatchError("元素 %d: %v", i, err)
 		}
 		models[i] = m
 	}
 	return models, nil
+}
+
+// convertBatchItem 转换单个元素并写入批量结果，SafeToPBs/SafeFromPBs 共用
+// pureFn 非 nil 时走零错误快速路径，否则走 convertPtrCached 慢速路径
+// 转换成功返回元素指针，失败返回 nil 并记录失败项
+func convertBatchItem[T any](
+	srcPtr unsafe.Pointer, dstVal *T, index int,
+	pureFn func(unsafe.Pointer, unsafe.Pointer),
+	c *BidiConverter, cache *fieldCache,
+	result *BatchResult,
+) *T {
+	var err error
+	if pureFn != nil {
+		pureFn(srcPtr, unsafe.Pointer(dstVal))
+	} else {
+		err = c.convertPtrCached(srcPtr, unsafe.Pointer(dstVal), cache)
+	}
+
+	item := BatchItem{Index: index}
+	if err != nil {
+		item.Success = false
+		item.Error = err
+		result.FailureCount++
+		result.Results = append(result.Results, item)
+		return nil
+	}
+	item.Success = true
+	item.Value = dstVal
+	result.SuccessCount++
+	result.Results = append(result.Results, item)
+	return dstVal
 }
 
 // SafeToPBs 安全批量将 Model 切片转换为 PB 切片，不因单个失败而中断
@@ -262,17 +327,15 @@ func SafeToPBs[M any, P any](models []M) ([]*P, *BatchResult) {
 	mType := reflect.TypeOf(models).Elem()
 
 	if mType.Kind() == reflect.Ptr {
-		// 槽位命中零装箱；未命中回源 converterCache 后仍走惰性创建回退
-		var c *BidiConverter
-		var cache *fieldCache
-		if e := lookupCachedConverter[P](mType.Elem()); e != nil {
-			c = e.converter
-			cache = e.modelToPB
-		} else {
-			c = getOrInitConverter[M, P]()
-			cache = c.modelToPBFieldCache()
+		// 槽位 key 与元素真实类型同源，未命中回源 loadEntry 惰性创建
+		e := lookupCachedConverter[P](mType.Elem())
+		if e == nil {
+			e = loadEntry[M, P]()
 		}
-		pureFast := cache.mergedCopyFunc != nil && len(cache.slowEntries) == 0
+		var pureFn func(unsafe.Pointer, unsafe.Pointer)
+		if e.mPure {
+			pureFn = e.mMerged
+		}
 		// 切片数据指针按元素大小步进，避免逐元素 reflect.ValueOf 构造
 		base := unsafe.SliceData(models)
 		elemSize := unsafe.Sizeof(*base)
@@ -287,49 +350,20 @@ func SafeToPBs[M any, P any](models []M) ([]*P, *BatchResult) {
 				result.Results = append(result.Results, item)
 				continue
 			}
-			p := &values[i]
-			var err error
-			if pureFast {
-				cache.mergedCopyFunc(srcPtr, unsafe.Pointer(p))
-			} else {
-				err = c.convertModelToPBPtrCached(srcPtr, unsafe.Pointer(p), cache)
-			}
-			if err != nil {
-				item.Success = false
-				item.Error = err
-				result.FailureCount++
-			} else {
-				item.Success = true
-				item.Value = p
+			if p := convertBatchItem(srcPtr, &values[i], i, pureFn, e.converter, e.modelToPB, result); p != nil {
 				pbs[i] = p
-				result.SuccessCount++
 			}
-			result.Results = append(result.Results, item)
 		}
 	} else {
-		c := getOrInitConverter[M, P]()
-		cache := c.modelToPBFieldCache()
-		pureFast := cache.mergedCopyFunc != nil && len(cache.slowEntries) == 0
+		e := loadEntry[M, P]()
+		var pureFn func(unsafe.Pointer, unsafe.Pointer)
+		if e.mPure {
+			pureFn = e.mMerged
+		}
 		for i := range models {
-			item := BatchItem{Index: i}
-			p := &values[i]
-			var err error
-			if pureFast {
-				cache.mergedCopyFunc(unsafe.Pointer(&models[i]), unsafe.Pointer(p))
-			} else {
-				err = c.convertModelToPBPtrCached(unsafe.Pointer(&models[i]), unsafe.Pointer(p), cache)
-			}
-			if err != nil {
-				item.Success = false
-				item.Error = err
-				result.FailureCount++
-			} else {
-				item.Success = true
-				item.Value = p
+			if p := convertBatchItem(unsafe.Pointer(&models[i]), &values[i], i, pureFn, e.converter, e.modelToPB, result); p != nil {
 				pbs[i] = p
-				result.SuccessCount++
 			}
-			result.Results = append(result.Results, item)
 		}
 	}
 
@@ -345,37 +379,24 @@ func SafeFromPBs[P any, M any](pbs []*P) ([]*M, *BatchResult) {
 		return models, result
 	}
 	values := make([]M, len(pbs))
-	c := getOrInitConverter[M, P]()
-	cache := c.pbToModelFieldCache()
-	pureFast := cache.mergedCopyFunc != nil && len(cache.slowEntries) == 0
+	e := loadEntry[M, P]()
+	var pureFn func(unsafe.Pointer, unsafe.Pointer)
+	if e.pbPure {
+		pureFn = e.pbMerged
+	}
 
 	for i, pb := range pbs {
-		item := BatchItem{Index: i}
 		if pb == nil {
+			item := BatchItem{Index: i}
 			item.Success = false
 			item.Error = NewConversionError("元素 %d: 输入为 nil", i)
 			result.FailureCount++
 			result.Results = append(result.Results, item)
 			continue
 		}
-		m := &values[i]
-		var err error
-		if pureFast {
-			cache.mergedCopyFunc(unsafe.Pointer(pb), unsafe.Pointer(m))
-		} else {
-			err = c.convertPBToModelPtrCached(unsafe.Pointer(pb), unsafe.Pointer(m), cache)
-		}
-		if err != nil {
-			item.Success = false
-			item.Error = err
-			result.FailureCount++
-		} else {
-			item.Success = true
-			item.Value = m
+		if m := convertBatchItem(unsafe.Pointer(pb), &values[i], i, pureFn, e.converter, e.pbToModel, result); m != nil {
 			models[i] = m
-			result.SuccessCount++
 		}
-		result.Results = append(result.Results, item)
 	}
 
 	return models, result

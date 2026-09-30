@@ -116,6 +116,14 @@ func makeUpdateEmptyCheck(ft reflect.Type, off uintptr) func(unsafe.Pointer) boo
 	return makeUpdateEmptyCheckAt(ft, off, 0)
 }
 
+// isEmptyAt 可比较类型零值判断闭包工厂，按目标类型从偏移读值与零值比较
+func isEmptyAt[T comparable](off uintptr) func(unsafe.Pointer) bool {
+	return func(base unsafe.Pointer) bool {
+		var zero T
+		return *(*T)(addPtr(base, off)) == zero
+	}
+}
+
 // makeUpdateEmptyCheckAt 按字段类型生成特化空值判断，depth 记录单字段 struct 下钻层数
 // 语义与 isEmptyUpdateValue 一致：nil 指针、空字符串、零值、空集合、零值时间视为空
 func makeUpdateEmptyCheckAt(ft reflect.Type, off uintptr, depth int) func(unsafe.Pointer) bool {
@@ -126,49 +134,33 @@ func makeUpdateEmptyCheckAt(ft reflect.Type, off uintptr, depth int) func(unsafe
 			return isEmptyUpdateString(s)
 		}
 	case reflect.Bool:
-		return func(base unsafe.Pointer) bool {
-			return !*(*bool)(addPtr(base, off))
-		}
+		return isEmptyAt[bool](off)
+	case reflect.Int:
+		return isEmptyAt[int](off)
 	case reflect.Int8:
-		return func(base unsafe.Pointer) bool {
-			return *(*int8)(addPtr(base, off)) == 0
-		}
+		return isEmptyAt[int8](off)
 	case reflect.Int16:
-		return func(base unsafe.Pointer) bool {
-			return *(*int16)(addPtr(base, off)) == 0
-		}
+		return isEmptyAt[int16](off)
 	case reflect.Int32:
-		return func(base unsafe.Pointer) bool {
-			return *(*int32)(addPtr(base, off)) == 0
-		}
-	case reflect.Int, reflect.Int64:
-		return func(base unsafe.Pointer) bool {
-			return *(*int64)(addPtr(base, off)) == 0
-		}
+		return isEmptyAt[int32](off)
+	case reflect.Int64:
+		return isEmptyAt[int64](off)
+	case reflect.Uint:
+		return isEmptyAt[uint](off)
 	case reflect.Uint8:
-		return func(base unsafe.Pointer) bool {
-			return *(*uint8)(addPtr(base, off)) == 0
-		}
+		return isEmptyAt[uint8](off)
 	case reflect.Uint16:
-		return func(base unsafe.Pointer) bool {
-			return *(*uint16)(addPtr(base, off)) == 0
-		}
+		return isEmptyAt[uint16](off)
 	case reflect.Uint32:
-		return func(base unsafe.Pointer) bool {
-			return *(*uint32)(addPtr(base, off)) == 0
-		}
-	case reflect.Uint, reflect.Uint64, reflect.Uintptr:
-		return func(base unsafe.Pointer) bool {
-			return *(*uint64)(addPtr(base, off)) == 0
-		}
+		return isEmptyAt[uint32](off)
+	case reflect.Uint64:
+		return isEmptyAt[uint64](off)
+	case reflect.Uintptr:
+		return isEmptyAt[uintptr](off)
 	case reflect.Float32:
-		return func(base unsafe.Pointer) bool {
-			return *(*float32)(addPtr(base, off)) == 0
-		}
+		return isEmptyAt[float32](off)
 	case reflect.Float64:
-		return func(base unsafe.Pointer) bool {
-			return *(*float64)(addPtr(base, off)) == 0
-		}
+		return isEmptyAt[float64](off)
 	case reflect.Ptr:
 		if ft == stringWrapperPtrType {
 			return func(base unsafe.Pointer) bool {
@@ -297,78 +289,55 @@ func makeUpdateEmitter(ft reflect.Type, off uintptr, isModel bool) func(unsafe.P
 	}
 }
 
+// emitDirect 基础类型直读装箱闭包工厂，按目标类型从偏移读值并装箱
+func emitDirect[T any](off uintptr) func(unsafe.Pointer) interface{} {
+	return func(base unsafe.Pointer) interface{} {
+		return *(*T)(addPtr(base, off))
+	}
+}
+
 // makeDirectEmitter 基础类型与 time.Time 的直读装箱闭包
 // 按字段 Kind 直接从偏移读取并装箱，无法特化时返回 nil 交由 reflect 回退
 func makeDirectEmitter(ft reflect.Type, off uintptr) func(unsafe.Pointer) interface{} {
 	switch ft.Kind() {
 	case reflect.String:
-		return func(base unsafe.Pointer) interface{} {
-			return *(*string)(addPtr(base, off))
-		}
+		return emitDirect[string](off)
 	case reflect.Bool:
-		return func(base unsafe.Pointer) interface{} {
-			return *(*bool)(addPtr(base, off))
-		}
+		return emitDirect[bool](off)
 	case reflect.Int:
-		return func(base unsafe.Pointer) interface{} {
-			return *(*int)(addPtr(base, off))
-		}
+		return emitDirect[int](off)
 	case reflect.Int8:
-		return func(base unsafe.Pointer) interface{} {
-			return *(*int8)(addPtr(base, off))
-		}
+		return emitDirect[int8](off)
 	case reflect.Int16:
-		return func(base unsafe.Pointer) interface{} {
-			return *(*int16)(addPtr(base, off))
-		}
+		return emitDirect[int16](off)
 	case reflect.Int32:
-		return func(base unsafe.Pointer) interface{} {
-			return *(*int32)(addPtr(base, off))
-		}
+		return emitDirect[int32](off)
 	case reflect.Int64:
-		return func(base unsafe.Pointer) interface{} {
-			return *(*int64)(addPtr(base, off))
-		}
+		return emitDirect[int64](off)
 	case reflect.Uint:
-		return func(base unsafe.Pointer) interface{} {
-			return *(*uint)(addPtr(base, off))
-		}
+		return emitDirect[uint](off)
 	case reflect.Uint8:
-		return func(base unsafe.Pointer) interface{} {
-			return *(*uint8)(addPtr(base, off))
-		}
+		return emitDirect[uint8](off)
 	case reflect.Uint16:
-		return func(base unsafe.Pointer) interface{} {
-			return *(*uint16)(addPtr(base, off))
-		}
+		return emitDirect[uint16](off)
 	case reflect.Uint32:
-		return func(base unsafe.Pointer) interface{} {
-			return *(*uint32)(addPtr(base, off))
-		}
-	case reflect.Uint64, reflect.Uintptr:
-		return func(base unsafe.Pointer) interface{} {
-			return *(*uint64)(addPtr(base, off))
-		}
+		return emitDirect[uint32](off)
+	case reflect.Uint64:
+		return emitDirect[uint64](off)
+	case reflect.Uintptr:
+		return emitDirect[uintptr](off)
 	case reflect.Float32:
-		return func(base unsafe.Pointer) interface{} {
-			return *(*float32)(addPtr(base, off))
-		}
+		return emitDirect[float32](off)
 	case reflect.Float64:
-		return func(base unsafe.Pointer) interface{} {
-			return *(*float64)(addPtr(base, off))
-		}
+		return emitDirect[float64](off)
 	case reflect.Interface:
 		if ft.NumMethod() == 0 {
-			return func(base unsafe.Pointer) interface{} {
-				return *(*interface{})(addPtr(base, off))
-			}
+			return emitDirect[interface{}](off)
 		}
 		return nil
 	case reflect.Struct:
 		if ft == timeType {
-			return func(base unsafe.Pointer) interface{} {
-				return *(*time.Time)(addPtr(base, off))
-			}
+			return emitDirect[time.Time](off)
 		}
 		return nil
 	default:

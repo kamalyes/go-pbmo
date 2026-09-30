@@ -15,6 +15,7 @@ package pbmo
 
 import (
 	"reflect"
+	"unsafe"
 
 	"google.golang.org/protobuf/types/known/wrapperspb"
 )
@@ -31,29 +32,54 @@ var (
 	stringValuePtrType = reflect.TypeOf((*wrapperspb.StringValue)(nil)) // *wrapperspb.StringValue 类型
 )
 
-// Go 基本类型指针类型变量，用于反射类型匹配
-var (
-	int32PtrType   = reflect.TypeOf((*int32)(nil))   // *int32 类型
-	int64PtrType   = reflect.TypeOf((*int64)(nil))   // *int64 类型
-	uint32PtrType  = reflect.TypeOf((*uint32)(nil))  // *uint32 类型
-	uint64PtrType  = reflect.TypeOf((*uint64)(nil))  // *uint64 类型
-	float32PtrType = reflect.TypeOf((*float32)(nil)) // *float32 类型
-	float64PtrType = reflect.TypeOf((*float64)(nil)) // *float64 类型
-	boolPtrType    = reflect.TypeOf((*bool)(nil))    // *bool 类型
-	stringPtrType  = reflect.TypeOf((*string)(nil))  // *string 类型
-)
+// wrapPtrCopy 生成 *T → *W 包装闭包：nil 透传，非 nil 分配包装对象并按偏移写入 Value
+func wrapPtrCopy[S any, W any](valueOff, srcOffset, dstOffset uintptr) fieldCopyFunc {
+	return func(srcBase, dstBase unsafe.Pointer) {
+		srcPtr := *(**S)(addPtr(srcBase, srcOffset))
+		if srcPtr == nil {
+			*(**W)(addPtr(dstBase, dstOffset)) = nil
+			return
+		}
+		w := new(W)
+		*(*S)(addPtr(unsafe.Pointer(w), valueOff)) = *srcPtr
+		*(**W)(addPtr(dstBase, dstOffset)) = w
+	}
+}
 
-// Go 基本类型值类型变量，用于反射类型匹配
-var (
-	int32ValueType   = reflect.TypeOf(int32(0))
-	int64ValueType   = reflect.TypeOf(int64(0))
-	uint32ValueType  = reflect.TypeOf(uint32(0))
-	uint64ValueType  = reflect.TypeOf(uint64(0))
-	float32ValueType = reflect.TypeOf(float32(0))
-	float64ValueType = reflect.TypeOf(float64(0))
-	boolValueType    = reflect.TypeOf(false)
-	stringValueType  = reflect.TypeOf("")
-)
+// unwrapPtrCopy 生成 *W → *T 解包闭包：nil 透传，非 nil 读取 Value 并取地址
+func unwrapPtrCopy[S any, W any](valueOff, srcOffset, dstOffset uintptr) fieldCopyFunc {
+	return func(srcBase, dstBase unsafe.Pointer) {
+		srcPtr := *(**W)(addPtr(srcBase, srcOffset))
+		if srcPtr == nil {
+			*(**S)(addPtr(dstBase, dstOffset)) = nil
+			return
+		}
+		val := *(*S)(addPtr(unsafe.Pointer(srcPtr), valueOff))
+		*(**S)(addPtr(dstBase, dstOffset)) = &val
+	}
+}
+
+// wrapValCopy 生成 T → *W 包装闭包：分配包装对象并按偏移写入 Value
+func wrapValCopy[S any, W any](valueOff, srcOffset, dstOffset uintptr) fieldCopyFunc {
+	return func(srcBase, dstBase unsafe.Pointer) {
+		w := new(W)
+		*(*S)(addPtr(unsafe.Pointer(w), valueOff)) = *(*S)(addPtr(srcBase, srcOffset))
+		*(**W)(addPtr(dstBase, dstOffset)) = w
+	}
+}
+
+// unwrapValCopy 生成 *W → T 解包闭包：nil 写零值，非 nil 读取 Value
+func unwrapValCopy[S any, W any](valueOff, srcOffset, dstOffset uintptr) fieldCopyFunc {
+	return func(srcBase, dstBase unsafe.Pointer) {
+		srcPtr := *(**W)(addPtr(srcBase, srcOffset))
+		if srcPtr == nil {
+			var zero S
+			*(*S)(addPtr(dstBase, dstOffset)) = zero
+			return
+		}
+		*(*S)(addPtr(dstBase, dstOffset)) = *(*S)(addPtr(unsafe.Pointer(srcPtr), valueOff))
+	}
+}
 
 // wrapperConverter 单个 Wrapper 类型的转换器
 // wrapperType: *wrapperspb.XxxValue 的反射类型
@@ -80,197 +106,53 @@ var (
 	wrapperByValueType   map[reflect.Type]*wrapperConverter // 值类型到转换器的映射
 )
 
+// newWrapperConverter 以泛型工厂构建单个 Wrapper 类型的反射转换器
+// wrap 为对应的 wrapperspb 构造函数（如 wrapperspb.Int32），四个方向闭包由工厂统一生成
+func newWrapperConverter[S any, W any](wrap func(S) *W, unwrap func(*W) S) wrapperConverter {
+	wrapperType := reflect.TypeOf((*W)(nil))
+	ptrType := reflect.TypeOf((*S)(nil))
+	valueType := ptrType.Elem()
+	return wrapperConverter{
+		wrapperType: wrapperType,
+		ptrType:     ptrType,
+		valueType:   valueType,
+		wrap: func(v reflect.Value) reflect.Value {
+			if v.IsNil() {
+				return reflect.Zero(wrapperType)
+			}
+			return reflect.ValueOf(wrap(*v.Interface().(*S)))
+		},
+		unwrap: func(v reflect.Value) reflect.Value {
+			if v.IsNil() {
+				return reflect.Zero(ptrType)
+			}
+			val := unwrap(v.Interface().(*W))
+			return reflect.ValueOf(&val)
+		},
+		valueWrap: func(v reflect.Value) reflect.Value {
+			return reflect.ValueOf(wrap(v.Interface().(S)))
+		},
+		valueUnwrap: func(v reflect.Value) reflect.Value {
+			if v.IsNil() {
+				return reflect.Zero(valueType)
+			}
+			return reflect.ValueOf(unwrap(v.Interface().(*W)))
+		},
+	}
+}
+
 // init 注册所有 *T ↔ *wrapperspb.XxxValue 的转换器
-// 每个转换器包含 wrap（*T → *wrapperspb.XxxValue）和 unwrap（*wrapperspb.XxxValue → *T）两个方向
 // 当源值为 nil 指针时，wrap/unwrap 返回对应类型的零值（nil 指针）
 func init() {
 	wrapperConverters = []wrapperConverter{
-		{
-			wrapperType: int32ValuePtrType, ptrType: int32PtrType, valueType: int32ValueType,
-			wrap: func(v reflect.Value) reflect.Value {
-				if v.IsNil() {
-					return reflect.Zero(int32ValuePtrType)
-				}
-				return reflect.ValueOf(wrapperspb.Int32(*v.Interface().(*int32)))
-			},
-			unwrap: func(v reflect.Value) reflect.Value {
-				if v.IsNil() {
-					return reflect.Zero(int32PtrType)
-				}
-				val := v.Interface().(*wrapperspb.Int32Value).Value
-				return reflect.ValueOf(&val)
-			},
-			valueWrap: func(v reflect.Value) reflect.Value { return reflect.ValueOf(wrapperspb.Int32(v.Interface().(int32))) },
-			valueUnwrap: func(v reflect.Value) reflect.Value {
-				if v.IsNil() {
-					return reflect.Zero(int32ValueType)
-				}
-				return reflect.ValueOf(v.Interface().(*wrapperspb.Int32Value).Value)
-			},
-		},
-		{
-			wrapperType: int64ValuePtrType, ptrType: int64PtrType, valueType: int64ValueType,
-			wrap: func(v reflect.Value) reflect.Value {
-				if v.IsNil() {
-					return reflect.Zero(int64ValuePtrType)
-				}
-				return reflect.ValueOf(wrapperspb.Int64(*v.Interface().(*int64)))
-			},
-			unwrap: func(v reflect.Value) reflect.Value {
-				if v.IsNil() {
-					return reflect.Zero(int64PtrType)
-				}
-				val := v.Interface().(*wrapperspb.Int64Value).Value
-				return reflect.ValueOf(&val)
-			},
-			valueWrap: func(v reflect.Value) reflect.Value { return reflect.ValueOf(wrapperspb.Int64(v.Interface().(int64))) },
-			valueUnwrap: func(v reflect.Value) reflect.Value {
-				if v.IsNil() {
-					return reflect.Zero(int64ValueType)
-				}
-				return reflect.ValueOf(v.Interface().(*wrapperspb.Int64Value).Value)
-			},
-		},
-		{
-			wrapperType: uint32ValuePtrType, ptrType: uint32PtrType, valueType: uint32ValueType,
-			wrap: func(v reflect.Value) reflect.Value {
-				if v.IsNil() {
-					return reflect.Zero(uint32ValuePtrType)
-				}
-				return reflect.ValueOf(wrapperspb.UInt32(*v.Interface().(*uint32)))
-			},
-			unwrap: func(v reflect.Value) reflect.Value {
-				if v.IsNil() {
-					return reflect.Zero(uint32PtrType)
-				}
-				val := v.Interface().(*wrapperspb.UInt32Value).Value
-				return reflect.ValueOf(&val)
-			},
-			valueWrap: func(v reflect.Value) reflect.Value { return reflect.ValueOf(wrapperspb.UInt32(v.Interface().(uint32))) },
-			valueUnwrap: func(v reflect.Value) reflect.Value {
-				if v.IsNil() {
-					return reflect.Zero(uint32ValueType)
-				}
-				return reflect.ValueOf(v.Interface().(*wrapperspb.UInt32Value).Value)
-			},
-		},
-		{
-			wrapperType: uint64ValuePtrType, ptrType: uint64PtrType, valueType: uint64ValueType,
-			wrap: func(v reflect.Value) reflect.Value {
-				if v.IsNil() {
-					return reflect.Zero(uint64ValuePtrType)
-				}
-				return reflect.ValueOf(wrapperspb.UInt64(*v.Interface().(*uint64)))
-			},
-			unwrap: func(v reflect.Value) reflect.Value {
-				if v.IsNil() {
-					return reflect.Zero(uint64PtrType)
-				}
-				val := v.Interface().(*wrapperspb.UInt64Value).Value
-				return reflect.ValueOf(&val)
-			},
-			valueWrap: func(v reflect.Value) reflect.Value { return reflect.ValueOf(wrapperspb.UInt64(v.Interface().(uint64))) },
-			valueUnwrap: func(v reflect.Value) reflect.Value {
-				if v.IsNil() {
-					return reflect.Zero(uint64ValueType)
-				}
-				return reflect.ValueOf(v.Interface().(*wrapperspb.UInt64Value).Value)
-			},
-		},
-		{
-			wrapperType: floatValuePtrType, ptrType: float32PtrType, valueType: float32ValueType,
-			wrap: func(v reflect.Value) reflect.Value {
-				if v.IsNil() {
-					return reflect.Zero(floatValuePtrType)
-				}
-				return reflect.ValueOf(wrapperspb.Float(*v.Interface().(*float32)))
-			},
-			unwrap: func(v reflect.Value) reflect.Value {
-				if v.IsNil() {
-					return reflect.Zero(float32PtrType)
-				}
-				val := v.Interface().(*wrapperspb.FloatValue).Value
-				return reflect.ValueOf(&val)
-			},
-			valueWrap: func(v reflect.Value) reflect.Value { return reflect.ValueOf(wrapperspb.Float(v.Interface().(float32))) },
-			valueUnwrap: func(v reflect.Value) reflect.Value {
-				if v.IsNil() {
-					return reflect.Zero(float32ValueType)
-				}
-				return reflect.ValueOf(v.Interface().(*wrapperspb.FloatValue).Value)
-			},
-		},
-		{
-			wrapperType: doubleValuePtrType, ptrType: float64PtrType, valueType: float64ValueType,
-			wrap: func(v reflect.Value) reflect.Value {
-				if v.IsNil() {
-					return reflect.Zero(doubleValuePtrType)
-				}
-				return reflect.ValueOf(wrapperspb.Double(*v.Interface().(*float64)))
-			},
-			unwrap: func(v reflect.Value) reflect.Value {
-				if v.IsNil() {
-					return reflect.Zero(float64PtrType)
-				}
-				val := v.Interface().(*wrapperspb.DoubleValue).Value
-				return reflect.ValueOf(&val)
-			},
-			valueWrap: func(v reflect.Value) reflect.Value {
-				return reflect.ValueOf(wrapperspb.Double(v.Interface().(float64)))
-			},
-			valueUnwrap: func(v reflect.Value) reflect.Value {
-				if v.IsNil() {
-					return reflect.Zero(float64ValueType)
-				}
-				return reflect.ValueOf(v.Interface().(*wrapperspb.DoubleValue).Value)
-			},
-		},
-		{
-			wrapperType: boolValuePtrType, ptrType: boolPtrType, valueType: boolValueType,
-			wrap: func(v reflect.Value) reflect.Value {
-				if v.IsNil() {
-					return reflect.Zero(boolValuePtrType)
-				}
-				return reflect.ValueOf(wrapperspb.Bool(*v.Interface().(*bool)))
-			},
-			unwrap: func(v reflect.Value) reflect.Value {
-				if v.IsNil() {
-					return reflect.Zero(boolPtrType)
-				}
-				val := v.Interface().(*wrapperspb.BoolValue).Value
-				return reflect.ValueOf(&val)
-			},
-			valueWrap: func(v reflect.Value) reflect.Value { return reflect.ValueOf(wrapperspb.Bool(v.Interface().(bool))) },
-			valueUnwrap: func(v reflect.Value) reflect.Value {
-				if v.IsNil() {
-					return reflect.Zero(boolValueType)
-				}
-				return reflect.ValueOf(v.Interface().(*wrapperspb.BoolValue).Value)
-			},
-		},
-		{
-			wrapperType: stringValuePtrType, ptrType: stringPtrType, valueType: stringValueType,
-			wrap: func(v reflect.Value) reflect.Value {
-				if v.IsNil() {
-					return reflect.Zero(stringValuePtrType)
-				}
-				return reflect.ValueOf(wrapperspb.String(*v.Interface().(*string)))
-			},
-			unwrap: func(v reflect.Value) reflect.Value {
-				if v.IsNil() {
-					return reflect.Zero(stringPtrType)
-				}
-				val := v.Interface().(*wrapperspb.StringValue).Value
-				return reflect.ValueOf(&val)
-			},
-			valueWrap: func(v reflect.Value) reflect.Value { return reflect.ValueOf(wrapperspb.String(v.Interface().(string))) },
-			valueUnwrap: func(v reflect.Value) reflect.Value {
-				if v.IsNil() {
-					return reflect.Zero(stringValueType)
-				}
-				return reflect.ValueOf(v.Interface().(*wrapperspb.StringValue).Value)
-			},
-		},
+		newWrapperConverter(wrapperspb.Int32, func(w *wrapperspb.Int32Value) int32 { return w.Value }),
+		newWrapperConverter(wrapperspb.Int64, func(w *wrapperspb.Int64Value) int64 { return w.Value }),
+		newWrapperConverter(wrapperspb.UInt32, func(w *wrapperspb.UInt32Value) uint32 { return w.Value }),
+		newWrapperConverter(wrapperspb.UInt64, func(w *wrapperspb.UInt64Value) uint64 { return w.Value }),
+		newWrapperConverter(wrapperspb.Float, func(w *wrapperspb.FloatValue) float32 { return w.Value }),
+		newWrapperConverter(wrapperspb.Double, func(w *wrapperspb.DoubleValue) float64 { return w.Value }),
+		newWrapperConverter(wrapperspb.Bool, func(w *wrapperspb.BoolValue) bool { return w.Value }),
+		newWrapperConverter(wrapperspb.String, func(w *wrapperspb.StringValue) string { return w.Value }),
 	}
 
 	// 初始化指针类型到包装器的映射
@@ -336,76 +218,84 @@ func tryConvertWrapper(src, dst reflect.Value) (bool, error) {
 	return false, nil
 }
 
+// derefWrapperVal 从 *wrapperspb.XxxValue 提取基础值，nil 指针返回零值
+func derefWrapperVal[S any, W any, P interface {
+	*W
+	GetValue() S
+}](v P) S {
+	if v == nil {
+		var zero S
+		return zero
+	}
+	return v.GetValue()
+}
+
+// wrapperValToPtr 将 *wrapperspb.XxxValue 解包为基础值指针，nil 指针透传
+func wrapperValToPtr[S any, W any, P interface {
+	*W
+	GetValue() S
+}](v P) *S {
+	if v == nil {
+		return nil
+	}
+	val := v.GetValue()
+	return &val
+}
+
+// ptrToWrapperVal 将基础值指针包装为 *wrapperspb.XxxValue，nil 指针透传
+func ptrToWrapperVal[S any, W any](wrap func(S) *W, v *S) *W {
+	if v == nil {
+		return nil
+	}
+	return wrap(*v)
+}
+
 // DerefInt32Val 从 *wrapperspb.Int32Value 中提取整数值
 // 当源值为 nil 指针时，DerefInt32Val 返回 0
 func DerefInt32Val(v *wrapperspb.Int32Value) int32 {
-	if v == nil {
-		return 0
-	}
-	return v.Value
+	return derefWrapperVal(v)
 }
 
 // DerefInt64Val 从 *wrapperspb.Int64Value 中提取整数值
 // 当源值为 nil 指针时，DerefInt64Val 返回 0
 func DerefInt64Val(v *wrapperspb.Int64Value) int64 {
-	if v == nil {
-		return 0
-	}
-	return v.Value
+	return derefWrapperVal(v)
 }
 
 // DerefUInt32Val 从 *wrapperspb.UInt32Value 中提取无符号整数值
 // 当源值为 nil 指针时，DerefUInt32Val 返回 0
 func DerefUInt32Val(v *wrapperspb.UInt32Value) uint32 {
-	if v == nil {
-		return 0
-	}
-	return v.Value
+	return derefWrapperVal(v)
 }
 
 // DerefUInt64Val 从 *wrapperspb.UInt64Value 中提取无符号整数值
 // 当源值为 nil 指针时，DerefUInt64Val 返回 0
 func DerefUInt64Val(v *wrapperspb.UInt64Value) uint64 {
-	if v == nil {
-		return 0
-	}
-	return v.Value
+	return derefWrapperVal(v)
 }
 
 // DerefFloatVal 从 *wrapperspb.FloatValue 中提取浮点数值
 // 当源值为 nil 指针时，DerefFloatVal 返回 0.0
 func DerefFloatVal(v *wrapperspb.FloatValue) float32 {
-	if v == nil {
-		return 0
-	}
-	return v.Value
+	return derefWrapperVal(v)
 }
 
 // DerefDoubleVal 从 *wrapperspb.DoubleValue 中提取浮点数值
 // 当源值为 nil 指针时，DerefDoubleVal 返回 0.0
 func DerefDoubleVal(v *wrapperspb.DoubleValue) float64 {
-	if v == nil {
-		return 0
-	}
-	return v.Value
+	return derefWrapperVal(v)
 }
 
 // DerefBoolVal 从 *wrapperspb.BoolValue 中提取布尔值
 // 当源值为 nil 指针时，DerefBoolVal 返回 false
 func DerefBoolVal(v *wrapperspb.BoolValue) bool {
-	if v == nil {
-		return false
-	}
-	return v.Value
+	return derefWrapperVal(v)
 }
 
 // DerefStringVal 从 *wrapperspb.StringValue 中提取字符串值
 // 当源值为 nil 指针时，DerefStringVal 返回空字符串 ""
 func DerefStringVal(v *wrapperspb.StringValue) string {
-	if v == nil {
-		return ""
-	}
-	return v.Value
+	return derefWrapperVal(v)
 }
 
 // DerefSlice 将 []*T 转换为 []T，nil 元素转为零值
@@ -422,151 +312,95 @@ func DerefSlice[T any](ptrs []*T) []T {
 // Int32ValueToPtr 将 *wrapperspb.Int32Value 转换为 *int32
 // 当源值为 nil 指针时，Int32ValueToPtr 返回 nil 指针
 func Int32ValueToPtr(v *wrapperspb.Int32Value) *int32 {
-	if v == nil {
-		return nil
-	}
-	val := v.Value
-	return &val
+	return wrapperValToPtr(v)
 }
 
 // Int64ValueToPtr 将 *wrapperspb.Int64Value 转换为 *int64
 // 当源值为 nil 指针时，Int64ValueToPtr 返回 nil 指针
 func Int64ValueToPtr(v *wrapperspb.Int64Value) *int64 {
-	if v == nil {
-		return nil
-	}
-	val := v.Value
-	return &val
+	return wrapperValToPtr(v)
 }
 
 // UInt32ValueToPtr 将 *wrapperspb.UInt32Value 转换为 *uint32
 // 当源值为 nil 指针时，UInt32ValueToPtr 返回 nil 指针
 func UInt32ValueToPtr(v *wrapperspb.UInt32Value) *uint32 {
-	if v == nil {
-		return nil
-	}
-	val := v.Value
-	return &val
+	return wrapperValToPtr(v)
 }
 
 // UInt64ValueToPtr 将 *wrapperspb.UInt64Value 转换为 *uint64
 // 当源值为 nil 指针时，UInt64ValueToPtr 返回 nil 指针
 func UInt64ValueToPtr(v *wrapperspb.UInt64Value) *uint64 {
-	if v == nil {
-		return nil
-	}
-	val := v.Value
-	return &val
+	return wrapperValToPtr(v)
 }
 
 // FloatValueToPtr 将 *wrapperspb.FloatValue 转换为 *float32
 // 当源值为 nil 指针时，FloatValueToPtr 返回 nil 指针
 func FloatValueToPtr(v *wrapperspb.FloatValue) *float32 {
-	if v == nil {
-		return nil
-	}
-	val := v.Value
-	return &val
+	return wrapperValToPtr(v)
 }
 
 // DoubleValueToPtr 将 *wrapperspb.DoubleValue 转换为 *float64
 // 当源值为 nil 指针时，DoubleValueToPtr 返回 nil 指针
 func DoubleValueToPtr(v *wrapperspb.DoubleValue) *float64 {
-	if v == nil {
-		return nil
-	}
-	val := v.Value
-	return &val
+	return wrapperValToPtr(v)
 }
 
 // BoolValueToPtr 将 *wrapperspb.BoolValue 转换为 *bool
 // 当源值为 nil 指针时，BoolValueToPtr 返回 nil 指针
 func BoolValueToPtr(v *wrapperspb.BoolValue) *bool {
-	if v == nil {
-		return nil
-	}
-	val := v.Value
-	return &val
+	return wrapperValToPtr(v)
 }
 
 // StringValueToPtr 将 *wrapperspb.StringValue 转换为 *string
 // 当源值为 nil 指针时，StringValueToPtr 返回 nil 指针
 func StringValueToPtr(v *wrapperspb.StringValue) *string {
-	if v == nil {
-		return nil
-	}
-	val := v.Value
-	return &val
+	return wrapperValToPtr(v)
 }
 
 // PtrToInt32Value 将 *int32 转换为 *wrapperspb.Int32Value
 // 当源值为 nil 指针时，PtrToInt32Value 返回 nil 指针
 func PtrToInt32Value(v *int32) *wrapperspb.Int32Value {
-	if v == nil {
-		return nil
-	}
-	return wrapperspb.Int32(*v)
+	return ptrToWrapperVal(wrapperspb.Int32, v)
 }
 
 // PtrToInt64Value 将 *int64 转换为 *wrapperspb.Int64Value
 // 当源值为 nil 指针时，PtrToInt64Value 返回 nil 指针
 func PtrToInt64Value(v *int64) *wrapperspb.Int64Value {
-	if v == nil {
-		return nil
-	}
-	return wrapperspb.Int64(*v)
+	return ptrToWrapperVal(wrapperspb.Int64, v)
 }
 
 // PtrToUInt32Value 将 *uint32 转换为 *wrapperspb.UInt32Value
 // 当源值为 nil 指针时，PtrToUInt32Value 返回 nil 指针
 func PtrToUInt32Value(v *uint32) *wrapperspb.UInt32Value {
-	if v == nil {
-		return nil
-	}
-	return wrapperspb.UInt32(*v)
+	return ptrToWrapperVal(wrapperspb.UInt32, v)
 }
 
 // PtrToUInt64Value 将 *uint64 转换为 *wrapperspb.UInt64Value
 // 当源值为 nil 指针时，PtrToUInt64Value 返回 nil 指针
 func PtrToUInt64Value(v *uint64) *wrapperspb.UInt64Value {
-	if v == nil {
-		return nil
-	}
-	return wrapperspb.UInt64(*v)
+	return ptrToWrapperVal(wrapperspb.UInt64, v)
 }
 
 // PtrToFloatValue 将 *float32 转换为 *wrapperspb.FloatValue
 // 当源值为 nil 指针时，PtrToFloatValue 返回 nil 指针
 func PtrToFloatValue(v *float32) *wrapperspb.FloatValue {
-	if v == nil {
-		return nil
-	}
-	return wrapperspb.Float(*v)
+	return ptrToWrapperVal(wrapperspb.Float, v)
 }
 
 // PtrToDoubleValue 将 *float64 转换为 *wrapperspb.DoubleValue
 // 当源值为 nil 指针时，PtrToDoubleValue 返回 nil 指针
 func PtrToDoubleValue(v *float64) *wrapperspb.DoubleValue {
-	if v == nil {
-		return nil
-	}
-	return wrapperspb.Double(*v)
+	return ptrToWrapperVal(wrapperspb.Double, v)
 }
 
 // PtrToBoolValue 将 *bool 转换为 *wrapperspb.BoolValue
 // 当源值为 nil 指针时，PtrToBoolValue 返回 nil 指针
 func PtrToBoolValue(v *bool) *wrapperspb.BoolValue {
-	if v == nil {
-		return nil
-	}
-	return wrapperspb.Bool(*v)
+	return ptrToWrapperVal(wrapperspb.Bool, v)
 }
 
 // PtrToStringValue 将 *string 转换为 *wrapperspb.StringValue
 // 当源值为 nil 指针时，PtrToStringValue 返回 nil 指针
 func PtrToStringValue(v *string) *wrapperspb.StringValue {
-	if v == nil {
-		return nil
-	}
-	return wrapperspb.String(*v)
+	return ptrToWrapperVal(wrapperspb.String, v)
 }

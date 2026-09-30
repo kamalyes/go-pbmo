@@ -30,34 +30,34 @@ func NewSafeConverter(pbType, modelType interface{}, opts ...Option) *SafeConver
 	}
 }
 
+// checkNotNil 校验输入非 nil 且非 typed-nil 指针，返回 nil 表示有效
+func checkNotNil(v interface{}, nilMsg, invalidMsg string) error {
+	if v == nil {
+		return NewNilValueError("%s", nilMsg)
+	}
+	// 检测 typed-nil 指针（interface 非 nil 但底层指针为 nil）
+	if rv := reflect.ValueOf(v); rv.Kind() == reflect.Ptr && rv.IsNil() {
+		return NewNilValueError("%s", invalidMsg)
+	}
+	return nil
+}
+
 // SafeConvertPBToModel 安全的 PB -> Model 转换
 // 自动处理 nil 与 typed-nil 指针，避免 panic
 // typed-nil 检查已覆盖 SafeAccess 的 IsValid 语义，不再重复构造反射包装
 func (sc *SafeConverter) SafeConvertPBToModel(pb interface{}, modelPtr interface{}) error {
-	if pb == nil {
-		return NewNilValueError("PB消息不能为空")
+	if err := checkNotNil(pb, "PB消息不能为空", "PB消息无效"); err != nil {
+		return err
 	}
-
-	// 检测 typed-nil 指针（interface 非 nil 但底层指针为 nil）
-	if v := reflect.ValueOf(pb); v.Kind() == reflect.Ptr && v.IsNil() {
-		return NewNilValueError("PB消息无效")
-	}
-
 	return sc.BidiConverter.ConvertPBToModel(pb, modelPtr)
 }
 
 // SafeConvertModelToPB 安全的 Model -> PB 转换
 // 自动处理 nil 与 typed-nil 指针，避免 panic
 func (sc *SafeConverter) SafeConvertModelToPB(model interface{}, pbPtr interface{}) error {
-	if model == nil {
-		return NewNilValueError("Model不能为空")
+	if err := checkNotNil(model, "Model不能为空", "Model无效"); err != nil {
+		return err
 	}
-
-	// 检测 typed-nil 指针（interface 非 nil 但底层指针为 nil）
-	if v := reflect.ValueOf(model); v.Kind() == reflect.Ptr && v.IsNil() {
-		return NewNilValueError("Model无效")
-	}
-
 	return sc.BidiConverter.ConvertModelToPB(model, pbPtr)
 }
 

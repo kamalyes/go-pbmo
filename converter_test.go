@@ -18,6 +18,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"google.golang.org/protobuf/types/known/structpb"
+	"google.golang.org/protobuf/types/known/timestamppb"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 )
 
@@ -26,6 +27,83 @@ func TestNewBidiConverter(t *testing.T) {
 	assert.NotNil(t, bc)
 	assert.NotNil(t, bc.transformers)
 	assert.NotNil(t, bc.options)
+}
+
+// allocGroupCompositeModel/allocGroupCompositePB 复合分配组回归测试模型
+// 覆盖 wrapper 包装/解包与时间戳互转字段，子对象全部来自同一复合分配
+type allocGroupCompositeModel struct {
+	Name      string
+	Count     *int32
+	Label     *string
+	CreatedAt time.Time
+	Extra     *wrapperspb.Int64Value
+}
+
+type allocGroupCompositePB struct {
+	Name      string
+	Count     *wrapperspb.Int32Value
+	Label     *wrapperspb.StringValue
+	CreatedAt *timestamppb.Timestamp
+	Extra     *wrapperspb.Int64Value
+}
+
+func TestAllocGroup_CompositeIsolation(t *testing.T) {
+	bc := NewBidiConverter(allocGroupCompositePB{}, allocGroupCompositeModel{})
+
+	// ModelToPB 两次转换：各结果子对象必须独立，复合体不跨转换共享
+	m := allocGroupCompositeModel{
+		Name:      "isolation",
+		CreatedAt: time.Date(2026, 7, 30, 12, 0, 0, 0, time.UTC),
+	}
+	cnt := int32(7)
+	lbl := "tag"
+	m.Count, m.Label = &cnt, &lbl
+
+	var pb1, pb2 allocGroupCompositePB
+	assert.NoError(t, bc.ConvertModelToPB(m, &pb1))
+	assert.NoError(t, bc.ConvertModelToPB(m, &pb2))
+
+	// 子对象指针互不相等，值相等
+	assert.NotSame(t, pb1.Count, pb2.Count)
+	assert.NotSame(t, pb1.Label, pb2.Label)
+	assert.NotSame(t, pb1.CreatedAt, pb2.CreatedAt)
+	assert.Equal(t, pb1.Count.GetValue(), pb2.Count.GetValue())
+	assert.Equal(t, pb1.Label.GetValue(), pb2.Label.GetValue())
+	assert.True(t, pb1.CreatedAt.AsTime().Equal(pb2.CreatedAt.AsTime()))
+
+	// 修改一处不影响另一处
+	pb1.Count.Value = 99
+	assert.Equal(t, int32(7), pb2.Count.GetValue())
+
+	// PBToModel 反向同样独立，nil wrapper 透传 nil
+	var m1, m2 allocGroupCompositeModel
+	assert.NoError(t, bc.ConvertPBToModel(pb1, &m1))
+	assert.NoError(t, bc.ConvertPBToModel(pb2, &m2))
+	assert.NotSame(t, m1.Count, m2.Count)
+	assert.Equal(t, int32(99), *m1.Count)
+	assert.Equal(t, int32(7), *m2.Count)
+	assert.Nil(t, m1.Extra)
+}
+
+func TestAllocGroup_ZeroAndNilSemantics(t *testing.T) {
+	bc := NewBidiConverter(allocGroupCompositePB{}, allocGroupCompositeModel{})
+
+	// 零值时间 → nil 时间戳，非零 wrapper 字段正常包装
+	m := allocGroupCompositeModel{Name: "zero", Count: new(int32)}
+	var pb allocGroupCompositePB
+	assert.NoError(t, bc.ConvertModelToPB(m, &pb))
+	assert.Nil(t, pb.CreatedAt)
+	assert.NotNil(t, pb.Count)
+	assert.Equal(t, int32(0), pb.Count.GetValue())
+	assert.Nil(t, pb.Label)
+
+	// nil wrapper → nil 指针，非 nil 零值 wrapper → 非 nil 零值指针，nil 时间戳 → 零值时间
+	var model allocGroupCompositeModel
+	assert.NoError(t, bc.ConvertPBToModel(pb, &model))
+	assert.NotNil(t, model.Count)
+	assert.Equal(t, int32(0), *model.Count)
+	assert.Nil(t, model.Label)
+	assert.True(t, model.CreatedAt.IsZero())
 }
 
 func TestConvertPBToModel_SimpleFields(t *testing.T) {
