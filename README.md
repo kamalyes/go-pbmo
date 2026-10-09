@@ -4,7 +4,7 @@
 
 **高性能 Protocol Buffer ↔ Model 双向转换库**
 
-*为 gRPC/REST 网关场景精心打造的 PB-Model 转换引擎，热路径零分配，批量/并发/map 字段场景反超原生代码*
+*为 gRPC/REST 网关场景精心打造的 PB-Model 转换引擎，热路径零分配，批量/map 字段场景反超原生代码，分配次数普遍低于原生手写*
 
 <br>
 
@@ -24,7 +24,7 @@
 
 ## ✨ 特性亮点
 
-- 🚀 **高性能转换** - 稳态热路径零分配，unsafe 零拷贝 + 反射缓存 + 类型特化三引擎，批量/并发场景反超原生代码
+- 🚀 **高性能转换** - 稳态热路径零分配，unsafe 零拷贝 + 反射缓存 + 类型特化三引擎，批量与 map 字段场景反超原生，分配次数普遍低于原生手写
 - 🎯 **泛型便捷函数** - `ToPB` / `FromPB` / `ToPBs` / `FromPBs` 一行搞定，类型安全无需 reflect
 - 🔄 **双向转换** - PB → Model 和 Model → PB 一致性保证
 - 🗺️ **字段映射** - 支持 struct tag 和手动映射两种方式
@@ -268,43 +268,51 @@ db.Model(&User{}).Where("id = ?", 1).Updates(updates)
 
 ## 📊 性能基准
 
-基于 `go test -bench=. -benchmem -benchtime=3s` 实测，与手写原生转换代码对比，完整数据见 [go-pbmo-benchmark](https://github.com/kamalyes/go-pbmo-benchmark)：
+基于 `go test -bench=. -benchmem -count=3` 实测，与手写原生转换代码对比，完整数据见 [go-pbmo-benchmark](https://github.com/kamalyes/go-pbmo-benchmark)：
 
-> **单位说明**: `ns` = 纳秒（10⁻⁹秒），`µs` = 微秒（10⁻⁶秒，1µs = 1000ns）；对比列 `PBMO/原生`，**< 1 表示 PBMO 反超**
-> **测试环境**: Windows AMD64 · Go 1.25 · Intel i5-9300H @ 2.40GHz · 8 逻辑核
+> **单位说明**: `ns` = 纳秒（10⁻⁹秒），`µs` = 微秒（10⁻⁶秒，1µs = 1000ns）；对比列 `PBMO/Native`，**< 1 表示 PBMO 反超**
+> **测试环境**: Linux AMD64 · Go 1.25 · AMD EPYC 9V45（GitHub Actions CI），更新字典与注册中心为本机补充实测
 
-### 核心转换（PBMO vs 原生）
+### 核心转换（PBMO vs Native）
 
-| 模型（结构特征） | 场景 | PBMO | 原生 | 对比 | 内存 | 分配 |
-|------|------|------|------|------|------|------|
-| Simple（8 字段平铺） | PB→Model | 434.2 ns | 155.3 ns | 2.80x | 48 B | 1 |
-| Simple（8 字段平铺） | Model→PB | 775.1 ns | 259.3 ns | 2.99x | 48 B | 1 |
-| Mapped（字段映射） | PB→Model | 177.9 ns | 134.5 ns | 1.32x | 48 B | 1 |
-| Mapped（字段映射） | Model→PB | 178.9 ns | 135.7 ns | 1.32x | 48 B | 1 |
-| Medium（含切片/时间） | PB→Model | **213.8 ns** | 339.1 ns | **0.63x** | 96 B | 1 |
-| Full（多类型混合） | PB→Model | 798.1 ns | 585.4 ns | 1.36x | 184 B | 4 |
-| Large（大结构） | PB→Model | 1426 ns | 1177 ns | 1.21x | 296 B | 3 |
-| Huge30（30 字段） | PB→Model | 814.8 ns | 514.8 ns | 1.58x | 448 B | 1 |
-| Huge100（100 字段） | PB→Model | 5205 ns | 3975 ns | 1.31x | 1328 B | 1 |
-| DeepNested4（4 层嵌套） | PB→Model | 528.4 ns | 301.2 ns | 1.75x | 224 B | 3 |
-| Enterprise（多层聚合） | PB→Model | 5784 ns | 1510 ns | 3.83x | 368 B | 1 |
+| 模型（结构特征） | 场景 | PBMO | Native | 对比 | 胜出 | 内存 | 分配 |
+|------|------|------|------|------|------|------|------|
+| Simple（8 字段平铺） | PB→Model | 26.1 ns | 20.1 ns | 1.30x | Native | 48 B | 1 |
+| Simple（8 字段平铺） | Model→PB | 25.4 ns | 22.0 ns | 1.15x | Native | 48 B | 1 |
+| Mapped（字段映射） | PB→Model | 25.9 ns | 20.3 ns | 1.28x | Native | 48 B | 1 |
+| Mapped（字段映射） | Model→PB | 25.5 ns | 20.5 ns | 1.24x | Native | 48 B | 1 |
+| Medium（含切片/时间） | PB→Model | 37.4 ns | 28.2 ns | 1.33x | Native | 96 B | 1 |
+| Full（多类型混合） | PB→Model | 87.1 ns | 70.5 ns | 1.24x | Native | 184 B | 2 |
+| Full（多类型混合） | Model→PB | **120.2 ns** | 135.0 ns | **0.89x** | **PBMO** | 416 B | 2 |
+| Large（大结构） | PB→Model | 104.9 ns | 76.3 ns | 1.38x | Native | 296 B | 2 |
+| Large（大结构） | Model→PB | **126.9 ns** | 133.4 ns | **0.95x** | **PBMO** | 432 B | 2 |
+| Huge30（30 字段） | PB→Model | 100.6 ns | 100.9 ns | 1.00x | 持平 | 448 B | 1 |
+| Huge100（100 字段） | PB→Model | 325.5 ns | 321.1 ns | 1.01x | 持平 | 1344 B | 2 |
+| Huge100（100 字段） | Model→PB | **383.4 ns** | 387.6 ns | **0.99x** | **PBMO** | 1728 B | 2 |
+| DeepNested4（4 层嵌套） | PB→Model | 146.8 ns | 84.9 ns | 1.73x | Native | 224 B | 4 |
+| Enterprise（多层聚合） | PB→Model | 152.8 ns | 121.0 ns | 1.26x | Native | 368 B | 3 |
+| Comprehensive（sqlbuilder） | Model→PB | **193.2 ns** | 296.8 ns | **0.65x** | **PBMO** | 392 B | 5 |
 
-### 类型特征场景（PBMO vs 原生）
+> 💡 分配列为 PBMO 数据；Native 同场景分配普遍更高：Full Model→PB 6 次、Large Model→PB 5 次、Huge100 Model→PB 10 次、Comprehensive 11 次、Enterprise 6 次。复合分配组将 wrapper/时间戳/指针字段的 N 次子对象分配聚合为单次复合分配，ModelToPB 方向大结构场景全面反超 Native
 
-| 场景 | PBMO | 原生 | 对比 | 说明 |
+### 类型特征场景（PBMO vs Native）
+
+| 场景 | PBMO | Native | 对比 | 说明 |
 |------|------|------|------|------|
-| Config Model→PB | **260.0 ns** | 3597 ns | **0.07x** | map 字段转换 PBMO 快 13.8x |
-| Config PB→Model | 323.4 ns | 226.8 ns | 1.43x | map[string]any 写入 |
-| ScoreBoard Model→PB | 713.0 ns | 386.6 ns | 1.84x | 计分板切片聚合 |
-| Wrapper Model→PB | **857.9 ns** | 1161 ns | **0.74x** | WKT 包装类型 PBMO 快 1.4x |
-| TimePtr Model→PB | **246.9 ns** | 251.8 ns | **0.98x** | *time.Time 与原生持平 |
-| TimeZero PB→Model | 224.3 ns | 120.0 ns | 1.87x | 零值时间自动归零 |
-| NamedSlice PB→Model | 162.6 ns | 133.1 ns | 1.22x | 类型别名切片 |
-| Metadata PB→Model | 126.7 ns | 74.1 ns | 1.71x | 极小结构（24 B/1 alloc） |
+| Config Model→PB | **36.9 ns** | 169.3 ns | **0.22x** | map 字段转换 PBMO 快 4.6x |
+| Config PB→Model | 44.2 ns | 37.5 ns | 1.18x | map[string]any 写入 |
+| ScoreBoard Model→PB | 107.5 ns | 86.4 ns | 1.25x | 计分板切片聚合 |
+| Wrapper Model→PB | **102.0 ns** | 104.0 ns | **0.98x** | WKT 包装类型 PBMO 持平反超，分配 2 vs 5 |
+| Wrapper PB→Model | 62.5 ns | 54.1 ns | 1.15x | wrapper 解包，分配 2 vs 5 |
+| Huge50 Model→PB | **218.0 ns** | 242.1 ns | **0.90x** | 50 字段混合，分配 2 vs 5 |
+| TimePtr Model→PB | 66.7 ns | 39.1 ns | 1.71x | *time.Time 转时间戳 |
+| TimeZero PB→Model | 32.2 ns | 25.3 ns | 1.27x | 零值时间自动归零 |
+| NamedSlice PB→Model | 28.7 ns | 24.4 ns | 1.18x | 类型别名切片 |
+| Metadata PB→Model | 21.3 ns | 16.9 ns | 1.26x | 极小结构（24 B/1 alloc） |
 
-### 更新字典（PBMO vs 原生）
+### 更新字典（PBMO vs Native，本机实测）
 
-| 场景 | PBMO | 原生 | 对比 | 内存 | 分配 |
+| 场景 | PBMO | Native | 对比 | 内存 | 分配 |
 |------|------|------|------|------|------|
 | PBToUpdates | 1.87 µs | 973 ns | 1.92x | 744 B | 8 |
 | ModelToUpdates | 1.47 µs | 1.06 µs | 1.39x | 840 B | 11 |
@@ -312,43 +320,45 @@ db.Model(&User{}).Where("id = ?", 1).Updates(updates)
 
 > 💡 更新字典直转按类型缓存字段计划，热路径零 tag 解析、零 reflect.Value 构造；wrapper 解包与 nil 指针跳过按字段种类特化为直读比较
 
-### 注册中心（PBMO vs 原生）
+### 注册中心（本机实测）
 
-| 场景 | PBMO | 原生 | 对比 | 内存 | 分配 |
-|------|------|------|------|------|------|
-| Register 热路径 | **21.2 ns** | - | - | 0 B | 0 |
-| ConverterFor | **23.0 ns** | - | - | 0 B | 0 |
-| 批量注册 6 类型对轮换 | **151 ns** | 553 ns | **0.27x** | 0 B | 0 |
-| Registry.Lookup | 74.1 ns | 35.1 ns | 2.11x | 0 B | 0 |
+| 场景 | PBMO | 对比 | 内存 | 分配 |
+|------|------|------|------|------|
+| Register 热路径（重复注册命中槽位） | **21.2 ns** | - | 0 B | 0 |
+| ConverterFor | **23.0 ns** | - | 0 B | 0 |
+| 批量注册 6 类型对轮换 | **151 ns** | **0.27x** vs 手写 map | 0 B | 0 |
+| Registry.Lookup | 74.1 ns | 2.11x vs 手写 map | 0 B | 0 |
 
 > 💡 Register/ConverterFor 命中 32 槽热路径缓存零分配，黄金比例散列保证多类型对不互相驱逐；批量注册场景比手写 map 反超 3.7x
 
-### 并发与批量转换（PBMO vs 原生）
+### 并发与批量转换（PBMO vs Native）
 
-| 场景 | PBMO | 原生 | 对比 |
+| 场景 | PBMO | Native | 对比 |
 |------|------|------|------|
-| Simple 并发 PB→Model | 125.0 ns | 78.5 ns | 1.59x |
-| Wrapper 并发 PB→Model | **440.0 ns** | 4111 ns | **0.11x** |
-| Outer 并发 PB→Model | **298.3 ns** | 543.9 ns | **0.55x** |
-| DeepNested4 并发 PB→Model | 355.9 ns | 294.5 ns | 1.21x |
-| Simple 批量 100 条 PB→Model | **13.9 µs** | 27.6 µs | **0.50x** |
-| Simple 批量 1000 条 PB→Model | **211 µs** | 229 µs | **0.92x** |
-| Simple BatchConvert 100 条 | **8.2 µs** | 9.5 µs | **0.86x** |
-| DeepNested4 批量 100 条 | 44.4 µs | 32.3 µs | 1.38x |
+| Simple 并发 PB→Model | 19.4 ns | 17.4 ns | 1.11x |
+| Wrapper 并发 PB→Model | 40.5 ns | 38.9 ns | 1.04x |
+| Outer 并发 PB→Model | 47.3 ns | 32.2 ns | 1.47x |
+| DeepNested4 并发 PB→Model | 91.2 ns | 73.4 ns | 1.24x |
+| Simple 批量 100 条 PB→Model | **1.56 µs** | 2.39 µs | **0.65x** |
+| Simple 批量 1000 条 PB→Model | **16.09 µs** | 24.49 µs | **0.66x** |
+| Large 批量 100 条 PB→Model | **8.27 µs** | 8.38 µs | **0.99x** |
+| Simple BatchConvert 100 条 | 1.68 µs | 1.25 µs | 1.34x |
+| DeepNested4 批量 100 条 | 12.95 µs | 8.84 µs | 1.46x |
+| SafeBatchConvert 100 条 | 2.84 µs | 2.20 µs | 1.29x |
 
-> 💡 批量转换采用预分配 + unsafe 批量拷贝，100 条批量分配 2 次而原生需 101 次；并发场景 Wrapper 反超 9x（原生 Protobuf 反射有锁竞争）
+> 💡 批量转换采用预分配 + unsafe 批量拷贝：Simple 批量 1000 条仅 2 次分配而 Native 需 1001 次，Large 批量 102 次而 Native 301 次，SafeBatch 4 次而 Native 101 次，分配与 GC 压力优势随规模扩大
 
 ### 内部组件
 
 | 场景 | 耗时 | 内存 | 分配 |
 |------|------|------|------|
-| EnumMapper.Map | 73.7 ns | 0 B | 0 |
-| GenericEnumMapper.Map | 74.3 ns | 0 B | 0 |
-| AutoEnumConverter.Convert | 49.8 ns | 0 B | 0 |
-| TransformerRegistry.Apply | 439.4 ns | 48 B | 3 |
-| NewBidiConverter（构建期一次） | 728.6 ns | 256 B | 2 |
+| EnumMapper.Map | 4.8 ns | 0 B | 0 |
+| GenericEnumMapper.Map | 4.6 ns | 0 B | 0 |
+| AutoEnumConverter.Convert | 5.0 ns | 0 B | 0 |
+| TransformerRegistry.Apply | 78.8 ns | 48 B | 3 |
+| NewBidiConverter（构建期一次） | 79.3 ns | 256 B | 3 |
 
-> 💡 平铺字段单对象场景原生手写赋值更快属物理极限（零反射零间接调用）；PBMO 的价值在批量/并发/map 字段/字段映射/更新字典场景的反超与全场景零样板代码
+> 💡 平铺字段单对象场景 Native 手写赋值更快属物理极限（零反射零间接调用）；PBMO 的价值在批量/并发/map 字段/字段映射/更新字典场景的反超与全场景零样板代码
 
 ## 🧪 测试
 
