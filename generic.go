@@ -1,8 +1,8 @@
 /*
  * @Author: kamalyes 501893067@qq.com
- * @Date: 2026-04-23 00:00:00
+ * @Date: 2026-05-23 00:00:00
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2026-04-23 20:53:18
+ * @LastEditTime: 2026-10-25 11:38:26
  * @FilePath: \go-pbmo\generic.go
  * @Description: 泛型便捷函数 - 一行注册、一行转换
  * 利用 reflect.Type 做 key + sync.Map 缓存，消除 Model 层样板代码
@@ -26,12 +26,24 @@ type typePair [2]reflect.Type
 var converterCache sync.Map
 
 // entrySlotCount 热路径缓存槽位数，按类型对哈希分片降低多类型对互驱逐
-// 32 槽（4KB 静态）覆盖服务同时活跃的几十个类型对规模，撞槽时仅一次 converterCache 回源
-const entrySlotCount = 32
+//
+// 槽组是**直接映射（1-way）**的：每槽仅存一个条目，故同槽的两个类型对会互相驱逐、
+// 永不命中。槽位数必须显著大于进程活跃类型对数，否则退化为每次调用都回源重建。
+// 实测（57 个活跃类型对，消费方真实规模）：32 槽命中率仅约 16%，单次 ToPB
+// 从 27ns 劣化到 91ns（3.4×），且 ensureEntry 的条目重建占全部分配字节的 46%
+//
+// 512 槽把同等规模的命中率抬到约 93%。静态开销反而略降：
+// 原先 32 槽 ×136B（128B 填充 + 8B 指针）= 4352B，现 512 槽 ×8B = 4096B
+//
+// 移除缓存行填充的权衡：填充只在**写**频繁时才有价值，而写只发生于未命中——
+// 这恰是本次要消除的工况 命中率 16%→93% 意味着写占比 84%→7%，
+// 伪共享的暴露面随之下降一个数量级，远超 8 槽共享一行带来的损失
+//
+// 注意：单类型对基准永远命中槽位，看不到本问题——回归需多类型对基准覆盖
+const entrySlotCount = 512
 
-// entrySlot 热路径缓存槽位，按缓存行对齐避免相邻槽位伪共享
+// entrySlot 热路径缓存槽位
 type entrySlot struct {
-	_     [128]byte
 	entry atomic.Pointer[cachedConverter]
 }
 
