@@ -2,7 +2,7 @@
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2026-05-23 00:00:00
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2026-10-25 11:38:26
+ * @LastEditTime: 2026-10-26 13:20:18
  * @FilePath: \go-pbmo\generic.go
  * @Description: 泛型便捷函数 - 一行注册、一行转换
  * 利用 reflect.Type 做 key + sync.Map 缓存，消除 Model 层样板代码
@@ -30,16 +30,16 @@ var converterCache sync.Map
 // 槽组是**直接映射（1-way）**的：每槽仅存一个条目，故同槽的两个类型对会互相驱逐、
 // 永不命中。槽位数必须显著大于进程活跃类型对数，否则退化为每次调用都回源重建。
 // 实测（57 个活跃类型对，消费方真实规模）：32 槽命中率仅约 16%，单次 ToPB
-// 从 27ns 劣化到 91ns（3.4×），且 ensureEntry 的条目重建占全部分配字节的 46%
+// 从 27ns 劣化到 91ns（3.4×），且 ensureEntry 的条目重建占全部分配字节的 46%。
 //
 // 512 槽把同等规模的命中率抬到约 93%。静态开销反而略降：
-// 原先 32 槽 ×136B（128B 填充 + 8B 指针）= 4352B，现 512 槽 ×8B = 4096B
+// 原先 32 槽 ×136B（128B 填充 + 8B 指针）= 4352B，现 512 槽 ×8B = 4096B。
 //
 // 移除缓存行填充的权衡：填充只在**写**频繁时才有价值，而写只发生于未命中——
-// 这恰是本次要消除的工况 命中率 16%→93% 意味着写占比 84%→7%，
-// 伪共享的暴露面随之下降一个数量级，远超 8 槽共享一行带来的损失
+// 这恰是本次要消除的工况。命中率 16%→93% 意味着写占比 84%→7%，
+// 伪共享的暴露面随之下降一个数量级，远超 8 槽共享一行带来的损失。
 //
-// 注意：单类型对基准永远命中槽位，看不到本问题——回归需多类型对基准覆盖
+// 注意：单类型对基准永远命中槽位，看不到本问题——回归需多类型对基准覆盖。
 const entrySlotCount = 512
 
 // entrySlot 热路径缓存槽位
@@ -196,6 +196,9 @@ func RegisterWith[M any, P any](opts ...Option) *BidiConverter {
 
 // ToPB 将 Model 转换为 PB 消息，nil 输入返回 nil
 // 类型字静态提取一次原子读命中即分发，纯拷贝直达合并闭包，稳态零反射
+//
+// 目标由本函数分配并返回，该分配必然逃逸；需要稳态零分配时改用 ToPBInto
+// 切片/map/指针类字段与源共享底层数据，不做防御性复制（见包文档「字段别名语义」）
 func ToPB[M any, P any](m *M) (*P, error) {
 	if m == nil {
 		return nil, nil
@@ -216,6 +219,9 @@ func ToPB[M any, P any](m *M) (*P, error) {
 
 // FromPB 将 PB 消息转换为 Model，nil 输入返回 nil
 // 类型字静态提取一次原子读命中即分发，纯拷贝直达合并闭包，稳态零反射
+//
+// 目标由本函数分配并返回，该分配必然逃逸；需要稳态零分配时改用 FromPBInto
+// 切片/map/指针类字段与源共享底层数据，不做防御性复制（见包文档「字段别名语义」）
 func FromPB[P any, M any](pb *P) (*M, error) {
 	if pb == nil {
 		return nil, nil
@@ -232,6 +238,67 @@ func FromPB[P any, M any](pb *P) (*M, error) {
 		return model, nil
 	}
 	return model, e.converter.convertPtrCached(unsafe.Pointer(pb), unsafe.Pointer(model), e.pbToModel)
+}
+
+// ToPBInto 将 Model 转换到调用方提供的 PB 目标，免去 ToPB 的目标堆分配
+//
+// 与 ToPB 的唯一差异是目标归属ToPB 必须 new(P) 后返回，该返回值必然逃逸——
+// 它是该路径 100% 的垃圾与约 47% 的单次耗时，也是并行扩展的真实天花板
+// （无锁竞争，纯分配/GC 压力：同一基准关掉 GC 后 1→10 核扩展比从 1.31× 升到 2.80×）
+// 本函数写入调用方持有的 dst，配合对象池复用即稳态零分配
+//
+// ⚠️ 调用方契约：dst 的清零责任在调用方
+// 拷贝计划只写「存在映射关系的字段」，未映射字段保持 dst 原有值不变——
+// 复用一个脏目标会残留上一轮的数据复用前请显式置零（*dst = P{}），
+// 或确认该类型对的全部字段均被映射覆盖
+//
+// m 为 nil 时不触碰 dst 并返回 nil（与 ToPB 的 nil→nil 语义一致）；
+// dst 为 nil 返回 ErrPBMessageNil
+//
+// 字段别名语义与 ToPB 完全一致：标量与 []byte/切片头经合并 memmove 直拷，
+// 切片类字段与源共享底层数组，不做防御性复制（见包文档「字段别名语义」）
+func ToPBInto[M any, P any](m *M, dst *P) error {
+	if m == nil {
+		return nil
+	}
+	if dst == nil {
+		return ErrPBMessageNil
+	}
+	mk := typeWordOf[M]()
+	pk := typeWordOf[P]()
+	e := lastEntries[slotIndexOf(mk, pk)].entry.Load()
+	if e == nil || e.key.model != mk || e.key.pb != pk {
+		e = ensureEntry[M, P](mk, pk)
+	}
+	if e.mPure {
+		e.mMerged(unsafe.Pointer(m), unsafe.Pointer(dst))
+		return nil
+	}
+	return e.converter.convertPtrCached(unsafe.Pointer(m), unsafe.Pointer(dst), e.modelToPB)
+}
+
+// FromPBInto 将 PB 消息转换到调用方提供的 Model 目标，免去 FromPB 的目标堆分配
+//
+// 与 ToPBInto 对偶，动机、契约与别名语义同上：dst 清零责任在调用方，
+// 未映射字段保持原值；pb 为 nil 时不触碰 dst 并返回 nil；dst 为 nil 返回 ErrModelNil
+func FromPBInto[P any, M any](pb *P, dst *M) error {
+	if pb == nil {
+		return nil
+	}
+	if dst == nil {
+		return ErrModelNil
+	}
+	mk := typeWordOf[M]()
+	pk := typeWordOf[P]()
+	e := lastEntries[slotIndexOf(mk, pk)].entry.Load()
+	if e == nil || e.key.model != mk || e.key.pb != pk {
+		e = ensureEntry[M, P](mk, pk)
+	}
+	if e.pbPure {
+		e.pbMerged(unsafe.Pointer(pb), unsafe.Pointer(dst))
+		return nil
+	}
+	return e.converter.convertPtrCached(unsafe.Pointer(pb), unsafe.Pointer(dst), e.pbToModel)
 }
 
 // ToPBs 批量将 Model 指针切片转换为 PB 切片
