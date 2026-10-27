@@ -22,8 +22,7 @@ type Options struct {
 	FieldMapping       map[string]string // 字段名映射: Model字段名 -> PB字段名
 	TagMappingEnabled  bool              // 是否启用 struct tag 自动映射
 	TagName            string            // struct tag 名称（默认 pbmo）
-	ValidationEnabled  bool              // 是否启用校验
-	DesensitizeEnabled bool              // 是否启用脱敏
+	DesensitizeEnabled bool              // 是否启用脱敏（默认关闭，开启后按字段 desensitize tag 生效）
 	SafeMode           bool              // 是否启用安全模式
 	Concurrency        int               // 并发数（批量转换时使用）
 	BatchSize          int               // 批处理大小
@@ -37,7 +36,6 @@ func DefaultOptions() *Options {
 		AutoTimeConversion: true,
 		TagMappingEnabled:  true,
 		TagName:            "pbmo",
-		ValidationEnabled:  false,
 		DesensitizeEnabled: false,
 		SafeMode:           false,
 		Concurrency:        0,
@@ -101,14 +99,24 @@ func WithTagName(name string) Option {
 	}
 }
 
-// WithValidation 启用/禁用校验
-func WithValidation(enabled bool) Option {
-	return func(o *Options) {
-		o.ValidationEnabled = enabled
-	}
-}
-
-// WithDesensitize 启用/禁用脱敏
+// WithDesensitize 启用/禁用脱敏，默认关闭
+//
+// 开启后也不是所有字段都脱敏：只处理带 desensitize tag 的字符串字段，
+// 无 tag 的类型拷贝计划与关闭时逐字节相同，不付任何代价
+//
+// 作用范围是本转换器自己的顶层字段，嵌套结构体不参与
+// 嵌套结构体的拷贝计划按「源类型+目标类型」全进程共享，承载不了 per-converter
+// 的开关——这与 AutoTimeConversion 对嵌套同样不生效是一致的
+// 嵌套字段需要脱敏时在输出层调 desensitize.Desensitization
+//
+// [EN] Off by default. Enabling it does not mask everything: only string fields
+// carrying a desensitize tag are touched, and a type with no tags gets
+// byte-for-byte the same copy plan as with masking off, at no cost. The scope is
+// this converter's own top-level fields; nested structs are excluded because
+// their copy plans are shared process-wide by source and destination type and
+// cannot carry a per-converter switch, exactly as AutoTimeConversion does not
+// reach nested plans either. Mask nested fields at the output layer with
+// desensitize.Desensitization
 func WithDesensitize(enabled bool) Option {
 	return func(o *Options) {
 		o.DesensitizeEnabled = enabled

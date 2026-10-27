@@ -5,7 +5,7 @@
  * @LastEditTime: 2026-04-20 00:00:00
  * @FilePath: \go-pbmo\helpers.go
  * @Description: 辅助函数 - 反射工具、类型判断
- * 复用 go-toolbox/types 的类型约束体系，减少重复定义
+ * 判定逐条按 go-toolbox/types 的约束语义内联，本库不引用该包
  *
  * Copyright (c) 2026 by kamalyes, All Rights Reserved.
  */

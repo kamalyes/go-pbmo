@@ -17,9 +17,6 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/kamalyes/go-argus/validate"
-	"github.com/kamalyes/go-toolbox/pkg/syncx"
-	"github.com/kamalyes/go-toolbox/pkg/types"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 )
 
@@ -59,7 +56,7 @@ type updatesPlan struct {
 }
 
 // updatesPlans 全局更新计划缓存，每个类型只构建一次
-var updatesPlans syncx.Map[updatesPlanKey, *updatesPlan]
+var updatesPlans syncMap[updatesPlanKey, *updatesPlan]
 
 // stringWrapperPtrType *wrapperspb.StringValue 类型，空值判断走专用语义
 var stringWrapperPtrType = reflect.TypeOf((*wrapperspb.StringValue)(nil))
@@ -88,12 +85,12 @@ func buildUpdatesPlan(t reflect.Type, isModel bool) *updatesPlan {
 		}
 		var key string
 		if isModel {
-			key = types.ResolveModelKey(field)
+			key = resolveModelKey(field)
 			if key == "-" {
 				continue
 			}
 		} else {
-			key = types.ResolvePBKey(field)
+			key = resolvePBKey(field)
 			if key == "" || key == "-" {
 				continue
 			}
@@ -203,7 +200,7 @@ func makeUpdateEmptyCheckAt(ft reflect.Type, off uintptr, depth int) func(unsafe
 	default:
 		// Interface / Func / Chan / 复数等动态语义类型，回退通用判断保证语义一致
 		return func(base unsafe.Pointer) bool {
-			return validate.IsEmptyValue(reflect.NewAt(ft, addPtr(base, off)).Elem())
+			return isEmptyReflectValue(reflect.NewAt(ft, addPtr(base, off)).Elem())
 		}
 	}
 }

@@ -5,7 +5,7 @@
  * @LastEditTime: 2026-04-20 00:00:00
  * @FilePath: \go-pbmo\registry.go
  * @Description: 转换器注册中心 - 统一管理和获取转换器实例
- * 使用 go-toolbox/syncx.Map 替代手动 sync.RWMutex + map，简化并发安全代码
+ * 使用内置 syncMap 替代手动 sync.RWMutex + map，简化并发安全代码
  *
  * Copyright (c) 2026 by kamalyes, All Rights Reserved.
  */
@@ -15,15 +15,13 @@ package pbmo
 import (
 	"fmt"
 	"reflect"
-
-	"github.com/kamalyes/go-toolbox/pkg/syncx"
 )
 
 // Registry 转换器注册中心
-// 使用 syncx.Map 统一管理 PB ↔ Model 转换器，天然并发安全
+// 使用 syncMap 统一管理 PB ↔ Model 转换器，天然并发安全
 // key 为类型对结构体，热路径零字符串分配
 type Registry struct {
-	converters *syncx.Map[typePair, *BidiConverter]
+	converters *syncMap[typePair, *BidiConverter]
 }
 
 // 全局注册中心实例
@@ -32,7 +30,7 @@ var globalRegistry = NewRegistry()
 // NewRegistry 创建转换器注册中心
 func NewRegistry() *Registry {
 	return &Registry{
-		converters: syncx.NewMap[typePair, *BidiConverter](),
+		converters: newSyncMap[typePair, *BidiConverter](),
 	}
 }
 
@@ -141,46 +139,4 @@ func (r *Registry) ConvertModelToPB(model, pb interface{}) error {
 		return fmt.Errorf("%w: %s", ErrConverterNotFound, registryKeyString(key[0], key[1]))
 	}
 	return converter.ConvertModelToPB(model, pb)
-}
-
-// 全局便捷函数
-
-// RegisterConverter 向全局注册中心注册转换器
-//
-// Deprecated: 使用泛型函数 Register[M, P]() 替代，自动创建并缓存转换器
-// 示例: pbmo.Register[UserModel, UserPB]()
-func RegisterConverter(converter *BidiConverter) error {
-	return globalRegistry.Register(converter)
-}
-
-// MustRegisterConverter 向全局注册中心注册转换器（已存在则 panic）
-//
-// Deprecated: 使用泛型函数 Register[M, P]() 替代，自动创建并缓存转换器
-// 示例: pbmo.Register[UserModel, UserPB]()
-func MustRegisterConverter(converter *BidiConverter) {
-	globalRegistry.MustRegister(converter)
-}
-
-// GetConverter 从全局注册中心获取转换器
-//
-// Deprecated: 使用泛型函数 ConverterFor[M, P]() 替代，类型安全无需 reflect
-// 示例: c := pbmo.ConverterFor[UserModel, UserPB]()
-func GetConverter(pbType, modelType reflect.Type) (*BidiConverter, error) {
-	return globalRegistry.Lookup(pbType, modelType)
-}
-
-// ConvertPBToModel 通过全局注册中心执行 PB -> Model 转换
-//
-// Deprecated: 使用泛型函数 FromPB[P, M](pb) 替代，类型安全无需传指针
-// 示例: model, err := pbmo.FromPB[UserPB, UserModel](pb)
-func ConvertPBToModel(pb, model interface{}) error {
-	return globalRegistry.ConvertPBToModel(pb, model)
-}
-
-// ConvertModelToPB 通过全局注册中心执行 Model -> PB 转换
-//
-// Deprecated: 使用泛型函数 ToPB[M, P](model) 替代，类型安全无需传指针。
-// 示例: pb, err := pbmo.ToPB[UserModel, UserPB](model)
-func ConvertModelToPB(model, pb interface{}) error {
-	return globalRegistry.ConvertModelToPB(model, pb)
 }

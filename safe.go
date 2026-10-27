@@ -4,7 +4,7 @@
  * @LastEditors: kamalyes 501893067@qq.com
  * @LastEditTime: 2023-09-26 00:00:00
  * @FilePath: \go-pbmo\safe.go
- * @Description: 安全转换器 - 利用 go-toolbox/safe 实现安全的字段访问和转换
+ * @Description: 安全转换器 - nil 与 typed-nil 安全的转换入口，零第三方依赖
  *
  * Copyright (c) 2026 by kamalyes, All Rights Reserved.
  */
@@ -13,12 +13,10 @@ package pbmo
 
 import (
 	"reflect"
-
-	"github.com/kamalyes/go-toolbox/pkg/safe"
 )
 
 // SafeConverter 安全转换器
-// 使用 go-toolbox/safe 进行链式安全访问，避免 nil panic
+// 在转换前拦截 nil 与 typed-nil 指针，避免转换引擎 panic
 type SafeConverter struct {
 	*BidiConverter
 }
@@ -44,7 +42,7 @@ func checkNotNil(v interface{}, nilMsg, invalidMsg string) error {
 
 // SafeConvertPBToModel 安全的 PB -> Model 转换
 // 自动处理 nil 与 typed-nil 指针，避免 panic
-// typed-nil 检查已覆盖 SafeAccess 的 IsValid 语义，不再重复构造反射包装
+// typed-nil 检查已覆盖 safe Access 的 IsValid 语义，不再重复构造反射包装
 func (sc *SafeConverter) SafeConvertPBToModel(pb interface{}, modelPtr interface{}) error {
 	if err := checkNotNil(pb, "PB消息不能为空", "PB消息无效"); err != nil {
 		return err
@@ -61,92 +59,17 @@ func (sc *SafeConverter) SafeConvertModelToPB(model interface{}, pbPtr interface
 	return sc.BidiConverter.ConvertModelToPB(model, pbPtr)
 }
 
-// SafeFieldAccess 安全字段访问
-// 使用 go-toolbox/safe 的链式调用访问嵌套字段，避免 nil panic
-func (sc *SafeConverter) SafeFieldAccess(obj interface{}, fieldNames ...string) *safe.SafeAccess {
-	sa := safe.Safe(obj)
-	for _, name := range fieldNames {
-		sa = sa.Field(name)
-	}
-	return sa
-}
-
-// SafeGetField 安全获取字段值
-// 返回字段的 SafeAccess，可进一步调用 .String()、.Int() 等方法
-func SafeGetField(obj interface{}, fieldName string) *safe.SafeAccess {
-	return safe.Safe(obj).Field(fieldName)
-}
-
-// SafeGetNestedField 安全获取嵌套字段值
-// 支持路径访问，如 "User.Profile.Name"
-func SafeGetNestedField(obj interface{}, path string) *safe.SafeAccess {
-	return safe.Safe(obj).At(path)
-}
-
-// SafeBatchConvertPBToModel 安全批量 PB -> Model 转换
-// 不因单个失败而中断，使用 go-toolbox/safe 检查 nil
+// 原先这里还有 SafeFieldAccess / SafeGetField / SafeGetNestedField 三个函数，
+// 返回类型是 *safe.Access，函数体就是 safe.New(obj).Field(name)
+// 一行转发：本库没有增加任何语义，只是把上游的名字换了一遍，因此移除
+// 需要链式安全访问的调用方直接用上游即可，而 safe 包本身零第三方依赖，
+// 直接引它不会给构建图添任何东西：
 //
-// Deprecated: 使用泛型函数 SafeFromPBs[P, M] 替代，类型更安全、调用更简洁。
-// 示例: models, result := pbmo.SafeFromPBs[UserPB, UserModel](pbs)
-func (sc *SafeConverter) SafeBatchConvertPBToModel(pbs interface{}, modelsPtr interface{}) *BatchResult {
-	result := &BatchResult{
-		Results: make([]BatchItem, 0),
-	}
-
-	pbsVal := reflect.ValueOf(pbs)
-	if pbsVal.Kind() == reflect.Ptr {
-		pbsVal = pbsVal.Elem()
-	}
-	if pbsVal.Kind() != reflect.Slice {
-		return result
-	}
-
-	modelsVal := reflect.ValueOf(modelsPtr)
-	if modelsVal.Kind() != reflect.Ptr {
-		return result
-	}
-	modelsVal = modelsVal.Elem()
-
-	modelType := modelsVal.Type().Elem()
-	isModelPtr := modelType.Kind() == reflect.Ptr
-	if isModelPtr {
-		modelType = modelType.Elem()
-	}
-
-	models := reflect.MakeSlice(modelsVal.Type(), pbsVal.Len(), pbsVal.Len())
-
-	for i := 0; i < pbsVal.Len(); i++ {
-		pb := pbsVal.Index(i)
-		item := BatchItem{Index: i}
-
-		if pb.IsZero() || (pb.Kind() == reflect.Ptr && pb.IsNil()) {
-			item.Success = false
-			item.Error = NewNilValueError("元素 %d 为空", i)
-			result.FailureCount++
-			result.Results = append(result.Results, item)
-			continue
-		}
-
-		modelPtr := reflect.New(modelType)
-		if err := sc.BidiConverter.ConvertPBToModel(pb.Interface(), modelPtr.Interface()); err != nil {
-			item.Success = false
-			item.Error = err
-			result.FailureCount++
-		} else {
-			item.Success = true
-			if isModelPtr {
-				item.Value = modelPtr.Interface()
-				models.Index(i).Set(modelPtr)
-			} else {
-				item.Value = modelPtr.Elem().Interface()
-				models.Index(i).Set(modelPtr.Elem())
-			}
-			result.SuccessCount++
-		}
-
-		result.Results = append(result.Results, item)
-	}
-
-	modelsVal.Set(models)
-	return result
-}
+//	import "github.com/kamalyes/go-toolbox/pkg/safe"
+//	safe.New(obj).Field("Value")        // 原 SafeGetField(obj, "Value")
+//	safe.New(obj).At("User.Profile.Name") // 原 SafeGetNestedField
+//
+// [EN] Three one-line passthroughs returning *safe.Access used to live here.
+// They added no semantics of their own beyond renaming upstream's, so they are
+// gone; call upstream directly as shown above. pkg/safe itself has no
+// third-party dependencies, so importing it adds nothing to the build graph

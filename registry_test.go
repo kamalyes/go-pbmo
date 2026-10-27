@@ -180,101 +180,10 @@ func TestRegistry_ConvertModelToPB(t *testing.T) {
 	assert.Equal(t, "registry_model", pb.Value)
 }
 
-func TestGlobalFunctions(t *testing.T) {
-	r := GlobalRegistry()
-	r.Clear()
-
-	bc := NewBidiConverter(TestSimplePB{}, TestSimpleModel{})
-	err := RegisterConverter(bc)
-	assert.NoError(t, err)
-
-	pb := TestSimplePB{Value: "global_test", Count: 1}
-	var model TestSimpleModel
-
-	err = ConvertPBToModel(pb, &model)
-	assert.NoError(t, err)
-	assert.Equal(t, "global_test", model.Value)
-
-	r.Clear()
-}
-
-// TestMustRegisterConverter 覆盖全局 MustRegisterConverter
-func TestMustRegisterConverter(t *testing.T) {
-	r := GlobalRegistry()
-	r.Clear()
-
-	bc := NewBidiConverter(TestSimplePB{}, TestSimpleModel{})
-	assert.NotPanics(t, func() {
-		MustRegisterConverter(bc)
-	})
-
-	r.Clear()
-}
-
-// TestMustRegisterConverter_Panic 覆盖 MustRegisterConverter 重复注册 panic
-func TestMustRegisterConverter_Panic(t *testing.T) {
-	r := GlobalRegistry()
-	r.Clear()
-
-	bc := NewBidiConverter(TestSimplePB{}, TestSimpleModel{})
-	MustRegisterConverter(bc)
-
-	assert.Panics(t, func() {
-		MustRegisterConverter(bc)
-	})
-
-	r.Clear()
-}
-
-// TestGetConverter 覆盖全局 GetConverter
-func TestGetConverter(t *testing.T) {
-	r := GlobalRegistry()
-	r.Clear()
-
-	bc := NewBidiConverter(TestSimplePB{}, TestSimpleModel{})
-	RegisterConverter(bc)
-
-	found, err := GetConverter(reflect.TypeOf(TestSimplePB{}), reflect.TypeOf(TestSimpleModel{}))
-	assert.NoError(t, err)
-	assert.Equal(t, bc, found)
-
-	// 未注册类型 → 返回错误
-	_, err = GetConverter(reflect.TypeOf(TestPB{}), reflect.TypeOf(TestModel{}))
-	assert.Error(t, err)
-
-	r.Clear()
-}
-
-// TestConvertModelToPB_Global 覆盖全局 ConvertModelToPB
-func TestConvertModelToPB_Global(t *testing.T) {
-	r := GlobalRegistry()
-	r.Clear()
-
-	bc := NewBidiConverter(TestSimplePB{}, TestSimpleModel{})
-	RegisterConverter(bc)
-
-	model := TestSimpleModel{Value: "global_m2p", Count: 55}
-	var pb TestSimplePB
-	err := ConvertModelToPB(model, &pb)
-	assert.NoError(t, err)
-	assert.Equal(t, "global_m2p", pb.Value)
-	assert.Equal(t, int32(55), pb.Count)
-
-	r.Clear()
-}
-
-// TestConvertModelToPB_Global_NotFound 覆盖全局 ConvertModelToPB 未注册的错误分支
-func TestConvertModelToPB_Global_NotFound(t *testing.T) {
-	r := GlobalRegistry()
-	r.Clear()
-
-	model := TestSimpleModel{Value: "x"}
-	var pb TestSimplePB
-	err := ConvertModelToPB(model, &pb)
-	assert.Error(t, err)
-
-	r.Clear()
-}
+// 全局便捷函数（RegisterConverter / MustRegisterConverter / GetConverter /
+// ConvertPBToModel / ConvertModelToPB）已删除，它们只是对 GlobalRegistry()
+// 同名方法的单行转发，对应测试随之移除
+// 底层行为仍由上面的 TestRegistry_* 系列覆盖
 
 // TestRegistry_ConvertPBToModel_NotFound 覆盖 Registry.ConvertPBToModel 未注册错误分支
 func TestRegistry_ConvertPBToModel_NotFound(t *testing.T) {

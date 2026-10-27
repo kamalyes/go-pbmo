@@ -64,12 +64,11 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/kamalyes/go-toolbox/pkg/desensitize"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/structpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 	"google.golang.org/protobuf/types/known/wrapperspb"
-
-	"github.com/kamalyes/go-toolbox/pkg/syncx"
 )
 
 // isProtoMessage 检查类型是否为 protobuf 生成的消息类型
@@ -126,20 +125,21 @@ const (
 // fastEntries：有 copyFunc 的字段（走 unsafe 快速路径）
 // slowEntries：无 copyFunc 的字段（走 reflect 慢速路径）
 type fieldMappingEntry struct {
-	srcIndex    []int             // 源字段索引（用于 FieldByIndex 回退路径）
-	dstIndex    []int             // 目标字段索引
-	srcType     reflect.Type      // 源字段类型
-	dstType     reflect.Type      // 目标字段类型
-	kind        fieldKind         // 字段类型分类
-	srcName     string            // 源字段名（用于 Transformer 查找）
-	dstName     string            // 目标字段名
-	wrapperConv *wrapperConverter // Wrapper 类型转换器（仅 fieldWrapper 使用）
-	wrapperDir  int               // Wrapper 方向：0=value→wrapper, 1=wrapper→value
-	srcOffset   uintptr           // 源字段在结构体中的偏移量（unsafe 路径直接使用）
-	dstOffset   uintptr           // 目标字段在结构体中的偏移量
-	fieldSize   uintptr           // 源字段大小（用于内存拷贝）
-	copyFunc    fieldCopyFunc     // 预生成的 unsafe 转换闭包（nil 则走 reflect 慢路径）
-	transformFn TransformerFunc   // 预绑定的字段转换器（reflect 回退路径使用，避免动态查询注册表）
+	srcIndex    []int                // 源字段索引（用于 FieldByIndex 回退路径）
+	dstIndex    []int                // 目标字段索引
+	srcType     reflect.Type         // 源字段类型
+	dstType     reflect.Type         // 目标字段类型
+	kind        fieldKind            // 字段类型分类
+	srcName     string               // 源字段名（用于 Transformer 查找）
+	dstName     string               // 目标字段名
+	wrapperConv *wrapperConverter    // Wrapper 类型转换器（仅 fieldWrapper 使用）
+	wrapperDir  int                  // Wrapper 方向：0=value→wrapper, 1=wrapper→value
+	srcOffset   uintptr              // 源字段在结构体中的偏移量（unsafe 路径直接使用）
+	dstOffset   uintptr              // 目标字段在结构体中的偏移量
+	fieldSize   uintptr              // 源字段大小（用于内存拷贝）
+	copyFunc    fieldCopyFunc        // 预生成的 unsafe 转换闭包（nil 则走 reflect 慢路径）
+	transformFn TransformerFunc      // 预绑定的字段转换器（reflect 回退路径使用，避免动态查询注册表）
+	maskFn      desensitize.MaskFunc // 预解析的脱敏函数（nil 表示该字段不脱敏，无 tag 时恒为 nil）
 }
 
 // fieldCache 字段缓存，包含 PB→Model 和 Model→PB 双向映射
@@ -188,7 +188,7 @@ type structFieldTypePair [2]reflect.Type
 // globalStructFieldCache 全局嵌套结构体字段缓存
 // 避免每次嵌套转换时重复构建字段映射，提升性能
 // 泛型 typed map 免去 interface 装箱与类型断言
-var globalStructFieldCache syncx.Map[structFieldTypePair, *structFieldCache]
+var globalStructFieldCache syncMap[structFieldTypePair, *structFieldCache]
 
 // sliceHeader 替代 sliceHeader，使用 unsafe.Pointer 避免 go vet 警告
 // sliceHeader.Data 是 uintptr 类型，转换为 unsafe.Pointer 会触发 vet 警告
@@ -1821,6 +1821,7 @@ func buildFieldCache(srcType, dstType reflect.Type, srcIsModel bool, opts *Optio
 			srcOffset:   srcField.Offset,
 			dstOffset:   dstField.Offset,
 			fieldSize:   srcField.Type.Size(),
+			maskFn:      resolveFieldMask(srcField, dstField, opts.DesensitizeEnabled),
 		}
 
 		switch {
@@ -1828,10 +1829,13 @@ func buildFieldCache(srcType, dstType reflect.Type, srcIsModel bool, opts *Optio
 			// 专用闭包内部走 convertFieldByKind，覆盖 copyFunc 为 nil 的字段组合
 			entry.copyFunc = makeTransformCopyFunc(entry, fn)
 			entry.transformFn = fn // reflect 回退路径（FieldByIndex）也需要应用转换器
+			// 转换器与脱敏叠加时，先转换再脱敏：脱敏必须是写入目标前的最后一道
+			entry.copyFunc = maybeWrapMask(entry.copyFunc, dstField.Offset, entry.maskFn)
 			fastEntries = append(fastEntries, entry)
 		default:
 			entry.copyFunc = makeFieldCopyFunc(kind, srcField.Type, dstField.Type,
 				srcField.Offset, dstField.Offset, wc, dir)
+			entry.copyFunc = maybeWrapMask(entry.copyFunc, dstField.Offset, entry.maskFn)
 			if entry.copyFunc != nil {
 				fastEntries = append(fastEntries, entry)
 			} else {
@@ -1951,7 +1955,7 @@ func buildMergedCopyFunc(entries []fieldMappingEntry) func(srcBase, dstBase unsa
 			dstType:   e.dstType,
 			srcOff:    e.srcOffset,
 			dstOff:    e.dstOffset,
-			groupable: e.transformFn == nil,
+			groupable: e.transformFn == nil && e.maskFn == nil,
 			legacy:    e.copyFunc,
 		}
 	}
@@ -2121,15 +2125,11 @@ func (bc *BidiConverter) RegisterFieldMapping(mappings map[string]string) *BidiC
 	return bc.WithFieldMappings(mappings)
 }
 
-// WithValidation 设置是否启用校验
-func (bc *BidiConverter) WithValidation(enabled bool) *BidiConverter {
-	bc.options.ValidationEnabled = enabled
-	return bc
-}
-
-// WithDesensitize 设置是否启用脱敏
+// WithDesensitize 设置是否启用脱敏，默认关闭
+// 开关影响拷贝计划的构建结果，必须让已建好的计划失效后重建
 func (bc *BidiConverter) WithDesensitize(enabled bool) *BidiConverter {
 	bc.options.DesensitizeEnabled = enabled
+	bc.invalidateCache()
 	return bc
 }
 
@@ -2485,6 +2485,9 @@ func convertFieldByKind(srcField, dstField reflect.Value, entry *fieldMappingEnt
 	case fieldNoop:
 	}
 
+	// 慢路径不经 copyFunc，脱敏在此收口，保证 fast/slow 两条路行为一致
+	applyMaskToField(dstField, entry.maskFn)
+
 	return nil
 }
 
@@ -2730,7 +2733,8 @@ func convertMapStruct(srcField, dstField reflect.Value) error {
 // buildStructFromMapStringSlice 直接从 map[string][]string 构建 *structpb.Struct
 // 跳过 structpb.NewStruct 的 map[string]interface{} 中间层和类型探测
 //
-// 核心优化：批量预分配。原实现每个 Value/StringValue/ListValue 均单独 new，
+// 核心优化：批量预分配
+// 原实现每个 Value/StringValue/ListValue 均单独 new，
 // 对于 N 键 M 值产生约 4N+2M+2 次分配；本实现将同类对象合并到连续数组中，
 // 通过 &array[i] 取地址复用，分配数降至常数级（~8 次），降幅约 85-90%
 //

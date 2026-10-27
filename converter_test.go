@@ -367,7 +367,6 @@ func TestBidiConverter_ChainCall(t *testing.T) {
 		WithFieldMapping("ID", "ClientId").
 		WithFieldMapping("Name", "UserName").
 		WithAutoTimeConversion(true).
-		WithValidation(false).
 		WithTagMapping(true)
 
 	pb := TestPBWithMapping{ClientId: 1, UserName: "chain_test", UserEmail: "chain@test.com"}
@@ -400,7 +399,6 @@ func TestBidiConverter_ChainCall_WithFieldMappings(t *testing.T) {
 func TestBidiConverter_ChainCall_OptionsModified(t *testing.T) {
 	bc := NewBidiConverter(TestSimplePB{}, TestSimpleModel{}).
 		WithAutoTimeConversion(false).
-		WithValidation(true).
 		WithDesensitize(true).
 		WithSafeMode(true).
 		WithTagName("custom").
@@ -409,7 +407,6 @@ func TestBidiConverter_ChainCall_OptionsModified(t *testing.T) {
 		WithTimeout(10 * time.Second)
 
 	assert.False(t, bc.options.AutoTimeConversion)
-	assert.True(t, bc.options.ValidationEnabled)
 	assert.True(t, bc.options.DesensitizeEnabled)
 	assert.True(t, bc.options.SafeMode)
 	assert.Equal(t, "custom", bc.options.TagName)

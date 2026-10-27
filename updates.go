@@ -18,8 +18,6 @@ import (
 	"reflect"
 	"strings"
 
-	"github.com/kamalyes/go-argus/validate"
-	"github.com/kamalyes/go-toolbox/pkg/serializer"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 )
 
@@ -150,13 +148,13 @@ func (b *UpdatesBuilder) SetStringValOrEmpty(key string, val *wrapperspb.StringV
 }
 
 func (b *UpdatesBuilder) SetJSON(key string, value string, defaultJSON ...string) *UpdatesBuilder {
-	b.updates[key] = serializer.NormalizeJSONText(value, defaultJSON...)
+	b.updates[key] = normalizeJSONText(value, defaultJSON...)
 	return b
 }
 
 func (b *UpdatesBuilder) SetJSONVal(key string, val *wrapperspb.StringValue, defaultJSON ...string) *UpdatesBuilder {
 	if val != nil {
-		b.updates[key] = serializer.NormalizeJSONText(val.Value, defaultJSON...)
+		b.updates[key] = normalizeJSONText(val.Value, defaultJSON...)
 	}
 	return b
 }
@@ -172,7 +170,7 @@ func (b *UpdatesBuilder) SetJSONSlice(key string, value interface{}) *UpdatesBui
 	if v.Kind() == reflect.Slice && v.IsNil() {
 		return b
 	}
-	data, err := serializer.JSONMarshal(value)
+	data, err := jsonMarshalSlice(v)
 	if err == nil {
 		b.updates[key] = string(data)
 	}
@@ -255,13 +253,13 @@ func isEmptyUpdateValue(value interface{}) bool {
 	if str, ok := value.(string); ok {
 		return isEmptyUpdateString(str)
 	}
-	return validate.IsEmptyValue(reflect.ValueOf(value))
+	return isEmptyReflectValue(reflect.ValueOf(value))
 }
 
 // isEmptyUpdateString 更新字典字符串空值判断
-// 语义与 validate.IsBlankString || validate.IfNullOrUndefined 一致
+// 语义与 isEmptyReflectValue 的字符串分支一致，并额外识别 null/undefined 字面量
 // 空串、全空白、以及 trim 后忽略大小写等于 null/undefined 均视为空
-// 内联实现避免热路径三个跨包调用与重复 TrimSpace，长度预筛与 EqualFold 严格等价
+// 长度预筛避免热路径重复 TrimSpace，与 EqualFold 严格等价
 func isEmptyUpdateString(value string) bool {
 	for i := 0; i < len(value); i++ {
 		c := value[i]

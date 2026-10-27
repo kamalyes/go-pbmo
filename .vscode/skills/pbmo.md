@@ -30,13 +30,18 @@
 | `SafeFromPBs` | `SafeFromPBs[P, M](pbs []*P) ([]*M, *BatchResult)` | 安全批量 PB → Model |
 | `ConverterFor` | `ConverterFor[M, P]() *BidiConverter` | 获取已注册的转换器 |
 
-### 传统 API（已 Deprecated，保留但不再推荐）
+### 已删除的 API
+
+以下 API 已**删除**（不是废弃，调用会编译失败）：
 
 - `BidiConverter.BatchConvertPBToModel` → 用 `FromPBs` 替代
 - `BidiConverter.BatchConvertModelToPB` → 用 `ToPBs` 替代
 - `BidiConverter.SafeBatchConvertPBToModel` → 用 `SafeFromPBs` 替代
 - `BidiConverter.SafeBatchConvertModelToPB` → 用 `SafeToPBs` 替代
+- `SafeConverter.SafeBatchConvertPBToModel` → 用 `SafeFromPBs` 替代
 - `RegisterConverter` / `MustRegisterConverter` → 用 `Register[M, P]()` 替代
+- `GetConverter` → 用 `ConverterFor[M, P]()` 替代
+- `ConvertPBToModel` / `ConvertModelToPB`（包级）→ 用 `FromPB` / `ToPB` 替代
 - `GetConverter` → 用 `ConverterFor[M, P]()` 替代
 - `ConvertPBToModel` / `ConvertModelToPB` → 用 `FromPB` / `ToPB` 替代
 
@@ -46,13 +51,12 @@
 |------|------|
 | `generic.go` | 泛型便捷函数（Register, ToPB, FromPB, ToPBs, FromPBs, SafeToPBs, SafeFromPBs, ConverterFor） |
 | `converter.go` | BidiConverter 核心双向转换器 |
-| `batch.go` | 批量转换（Deprecated，保留兼容） |
-| `registry.go` | Registry 注册中心 + 全局便捷函数（Deprecated，保留兼容） |
+| `batch.go` | 批量转换的内部实现与 `BatchResult` / `BatchItem` 结构 |
+| `registry.go` | Registry 注册中心 |
 | `safe.go` | SafeConverter 安全转换器 |
 | `desensitize.go` | DesensitizeConverter 脱敏转换器 |
 | `enum.go` | EnumMapper / GenericEnumMapper 枚举映射 |
 | `transform.go` | TransformerRegistry 字段转换器 |
-| `validate.go` | Validator 参数校验 |
 | `time.go` | 时间转换工具 |
 | `option.go` | Functional Options 选项模式 |
 | `errors.go` | 类型化错误体系 |
@@ -132,7 +136,7 @@ c.RegisterTransformer("Name", func(v interface{}) interface{} {
 
 当用户需要从旧 API 迁移时，参考以下对照表：
 
-| 旧 API（Deprecated） | 新 API（推荐） |
+| 已删除的 API | 替代品 |
 |----------------------|---------------|
 | `NewBidiConverter(PB{}, Model{})` + `RegisterConverter(c)` | `Register[Model, PB]()` |
 | `converter.ConvertModelToPB(m, &pb)` | `ToPB[Model, PB](m)` |

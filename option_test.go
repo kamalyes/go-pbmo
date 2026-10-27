@@ -26,7 +26,6 @@ func TestDefaultOptions(t *testing.T) {
 	assert.Empty(t, opts.FieldMapping, "默认字段映射应为空")
 	assert.True(t, opts.TagMappingEnabled, "默认应启用tag映射")
 	assert.Equal(t, "pbmo", opts.TagName, "默认tag名应为pbmo")
-	assert.False(t, opts.ValidationEnabled, "默认不启用校验")
 	assert.False(t, opts.DesensitizeEnabled, "默认不启用脱敏")
 	assert.False(t, opts.SafeMode, "默认不启用安全模式")
 	assert.Equal(t, 100, opts.BatchSize, "默认批处理大小应为100")
@@ -36,7 +35,6 @@ func TestDefaultOptions(t *testing.T) {
 func TestApplyOptions(t *testing.T) {
 	opts := ApplyOptions(
 		WithAutoTimeConversion(false),
-		WithValidation(true),
 		WithDesensitize(true),
 		WithSafeMode(true),
 		WithBatchSize(50),
@@ -44,7 +42,6 @@ func TestApplyOptions(t *testing.T) {
 	)
 
 	assert.False(t, opts.AutoTimeConversion)
-	assert.True(t, opts.ValidationEnabled)
 	assert.True(t, opts.DesensitizeEnabled)
 	assert.True(t, opts.SafeMode)
 	assert.Equal(t, 50, opts.BatchSize)

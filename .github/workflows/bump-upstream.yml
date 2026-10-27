@@ -56,6 +56,18 @@ jobs:
           fi
           echo "bump-level=${bump_level}" >> "$GITHUB_OUTPUT"
 
+      # go mod tidy 只解析依赖图，不做类型检查：上游若有破坏性变更，
+      # 不加这道闸门就会把编译不过的 go.mod 提交并打上 tag
+      # [EN] go mod tidy resolves the module graph without type-checking, so a
+      # breaking upstream change would otherwise be committed and tagged
+      # uncompilable
+      - name: Verify build before commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          go build ./...
+          go vet ./...
+
       - name: Commit and push
         id: commit
         shell: bash

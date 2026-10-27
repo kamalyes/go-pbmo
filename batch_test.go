@@ -16,117 +16,105 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/types/known/timestamppb"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 )
 
 // TestBatchConvertPBToModel 测试批量 PB -> Model 转换
-func TestBatchConvertPBToModel(t *testing.T) {
-	bc := NewBidiConverter(TestSimplePB{}, TestSimpleModel{})
+// 批量转换的废弃包装已删除，这里改用泛型替代品
+// 原先的「传入非切片」「目标非指针」两条用例随之消失：
+// 泛型签名在编译期就排除了这两种调用，运行时无从构造
 
-	pbs := []TestSimplePB{
+// TestFromPBs 批量 PB -> Model
+func TestFromPBs(t *testing.T) {
+	pbs := []*TestSimplePB{
 		{Value: "first", Count: 1},
 		{Value: "second", Count: 2},
 		{Value: "third", Count: 3},
 	}
-	var models []TestSimpleModel
 
-	err := bc.BatchConvertPBToModel(pbs, &models)
+	models, err := FromPBs[TestSimplePB, TestSimpleModel](pbs)
 	assert.NoError(t, err)
 	assert.Len(t, models, 3)
 	assert.Equal(t, "first", models[0].Value)
 	assert.Equal(t, int32(2), models[1].Count)
 }
 
-// TestBatchConvertModelToPB 测试批量 Model -> PB 转换
-func TestBatchConvertModelToPB(t *testing.T) {
-	bc := NewBidiConverter(TestSimplePB{}, TestSimpleModel{})
-
-	models := []TestSimpleModel{
+// TestToPBs 批量 Model -> PB
+func TestToPBs(t *testing.T) {
+	models := []*TestSimpleModel{
 		{Value: "m1", Count: 10},
 		{Value: "m2", Count: 20},
 	}
-	var pbs []TestSimplePB
 
-	err := bc.BatchConvertModelToPB(models, &pbs)
+	pbs, err := ToPBs[TestSimpleModel, TestSimplePB](models)
 	assert.NoError(t, err)
 	assert.Len(t, pbs, 2)
 	assert.Equal(t, "m1", pbs[0].Value)
 	assert.Equal(t, int32(20), pbs[1].Count)
 }
 
-// TestBatchConvertPBToModel_PointerSlice 测试指针切片的批量转换
-func TestBatchConvertPBToModel_PointerSlice(t *testing.T) {
-	bc := NewBidiConverter(TestSimplePB{}, TestSimpleModel{})
-
-	pbs := []*TestSimplePB{
-		{Value: "ptr1", Count: 11},
-		{Value: "ptr2", Count: 22},
-	}
-	var models []*TestSimpleModel
-
-	err := bc.BatchConvertPBToModel(pbs, &models)
+// TestFromPBs_Empty 空切片与 nil 切片都返回空结果而非报错
+func TestFromPBs_Empty(t *testing.T) {
+	models, err := FromPBs[TestSimplePB, TestSimpleModel](nil)
 	assert.NoError(t, err)
-	assert.Len(t, models, 2)
-	assert.Equal(t, "ptr1", models[0].Value)
-	assert.Equal(t, int32(22), models[1].Count)
+	assert.Empty(t, models)
+
+	models, err = FromPBs[TestSimplePB, TestSimpleModel]([]*TestSimplePB{})
+	assert.NoError(t, err)
+	assert.Empty(t, models)
 }
 
-// TestBatchConvert_NonSlice 测试传入非切片类型时返回错误
-func TestBatchConvert_NonSlice(t *testing.T) {
-	bc := NewBidiConverter(TestSimplePB{}, TestSimpleModel{})
-
-	notSlice := TestSimplePB{Value: "not_slice"}
-	var models []TestSimpleModel
-
-	err := bc.BatchConvertPBToModel(notSlice, &models)
-	assert.Error(t, err)
-}
-
-// TestBatchConvert_NonPointerTarget 测试目标参数非指针时返回错误
-func TestBatchConvert_NonPointerTarget(t *testing.T) {
-	bc := NewBidiConverter(TestSimplePB{}, TestSimpleModel{})
-
-	pbs := []TestSimplePB{{Value: "test"}}
-	var models []TestSimpleModel
-
-	err := bc.BatchConvertPBToModel(pbs, models)
-	assert.Error(t, err)
-}
-
-// TestSafeBatchConvertPBToModel 测试安全批量 PB -> Model 转换
-func TestSafeBatchConvertPBToModel(t *testing.T) {
-	bc := NewBidiConverter(TestSimplePB{}, TestSimpleModel{})
-
-	pbs := []TestSimplePB{
+// TestSafeFromPBs 安全批量 PB -> Model，逐元素收集结果
+func TestSafeFromPBs(t *testing.T) {
+	pbs := []*TestSimplePB{
 		{Value: "ok1", Count: 1},
 		{Value: "ok2", Count: 2},
 	}
-	var models []TestSimpleModel
 
-	result := bc.SafeBatchConvertPBToModel(pbs, &models)
+	models, result := SafeFromPBs[TestSimplePB, TestSimpleModel](pbs)
 	assert.Equal(t, 2, result.SuccessCount)
 	assert.Equal(t, 0, result.FailureCount)
 	assert.Len(t, models, 2)
+	assert.Equal(t, "ok1", models[0].Value)
 }
 
-// TestSafeBatchConvertModelToPB 测试安全批量 Model -> PB 转换
-func TestSafeBatchConvertModelToPB(t *testing.T) {
-	bc := NewBidiConverter(TestSimplePB{}, TestSimpleModel{})
-
+// TestSafeToPBs 安全批量 Model -> PB
+func TestSafeToPBs(t *testing.T) {
 	models := []TestSimpleModel{
 		{Value: "safe1", Count: 100},
 		{Value: "safe2", Count: 200},
 	}
-	var pbs []TestSimplePB
 
-	result := bc.SafeBatchConvertModelToPB(models, &pbs)
+	pbs, result := SafeToPBs[TestSimpleModel, TestSimplePB](models)
 	assert.Equal(t, 2, result.SuccessCount)
 	assert.Equal(t, 0, result.FailureCount)
 	assert.Len(t, pbs, 2)
+	assert.Equal(t, int32(200), pbs[1].Count)
 }
 
-// TestBatchResult 测试批量转换结果结构体
+// TestSafeFromPBs_NilElement nil 元素计入失败而不中断其余转换
+func TestSafeFromPBs_NilElement(t *testing.T) {
+	pbs := []*TestSimplePB{
+		{Value: "ok", Count: 1},
+		nil,
+		{Value: "alsoOk", Count: 3},
+	}
+
+	models, result := SafeFromPBs[TestSimplePB, TestSimpleModel](pbs)
+	assert.Equal(t, 2, result.SuccessCount)
+	assert.Equal(t, 1, result.FailureCount)
+	assert.Len(t, result.Results, 3)
+
+	// 结果切片与输入保持下标对齐，失败处留 nil
+	// 调用方才能把失败项对回原始输入，这也是它不做压缩的原因
+	require.Len(t, models, 3)
+	assert.Nil(t, models[1])
+	assert.Equal(t, "ok", models[0].Value)
+	assert.Equal(t, "alsoOk", models[2].Value)
+}
+
 func TestBatchResult(t *testing.T) {
 	result := &BatchResult{
 		Results: make([]BatchItem, 0),
