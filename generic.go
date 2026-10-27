@@ -2,7 +2,7 @@
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2026-05-23 00:00:00
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2026-10-26 13:20:18
+ * @LastEditTime: 2026-10-27 09:17:37
  * @FilePath: \go-pbmo\generic.go
  * @Description: 泛型便捷函数 - 一行注册、一行转换
  * 利用 reflect.Type 做 key + sync.Map 缓存，消除 Model 层样板代码
@@ -509,8 +509,38 @@ func ModelToUpdates[M any](m *M) map[string]interface{} {
 
 // buildUpdatesFromPlan 按预构建计划输出更新字段
 // 空值跳过语义与旧反射实现一致：nil 指针、空字符串、零值、空集合不输出
+// updatesPresizeThreshold 触发「精确计数预分配」的计划字段数下限
+//
+// map 的 bucket 分配对容量提示存在台阶：提示 ≤ 8 时不额外分配（单 bucket 内联），
+// ≥ 9 时才申请 bucket 数组实测（go1.26.2，插入 4 项）：
+//
+//	hint=4/6/8 → 0 B/op、0 allocs/op
+//	hint=9/12  → 616 B/op、3 allocs/op
+//
+// 因此只有计划字段数跨过该台阶时，按实际条数预分配才可能省下 bucket；
+// 否则计数那一趟是纯开销（小结构体的字段填充率通常还很高）
+const updatesPresizeThreshold = 8
+
+// buildUpdatesFromPlan 按预构建计划输出更新字段
+// 空值跳过语义与旧反射实现一致：nil 指针、空字符串、零值、空集合不输出
 func buildUpdatesFromPlan(plan *updatesPlan, base unsafe.Pointer) map[string]interface{} {
-	updates := make(map[string]interface{}, len(plan.fields))
+	// 计划覆盖该类型的全部字段，而偏量更新通常只写其中少数几个：
+	// 按 len(plan.fields) 预分配会为用不到的条目多申请一级 bucket
+	// 跨过 bucket 台阶时先数一遍非空字段再精确预分配——empty 是零分配特化闭包
+	// （一次偏移读 + 一次比较，约 1–2ns/字段），这一趟远比多出的 bucket 便宜
+	// 未跨台阶则直接按计划长度预分配，不付计数开销（见 updatesPresizeThreshold）
+	size := len(plan.fields)
+	if size > updatesPresizeThreshold {
+		n := 0
+		for i := range plan.fields {
+			if !plan.fields[i].empty(base) {
+				n++
+			}
+		}
+		size = n
+	}
+
+	updates := make(map[string]interface{}, size)
 	for i := range plan.fields {
 		entry := &plan.fields[i]
 		if entry.empty(base) {

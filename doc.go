@@ -2,7 +2,7 @@
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2026-10-20 00:00:00
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2026-10-26 13:20:18
+ * @LastEditTime: 2026-10-27 09:17:37
  * @FilePath: \go-pbmo\doc.go
  * @Description: 包文档
  *
