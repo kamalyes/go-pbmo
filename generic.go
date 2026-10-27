@@ -1,8 +1,8 @@
 /*
  * @Author: kamalyes 501893067@qq.com
- * @Date: 2026-05-23 00:00:00
+ * @Date: 2026-04-23 00:00:00
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2026-10-27 09:17:37
+ * @LastEditTime: 2026-10-27 11:35:07
  * @FilePath: \go-pbmo\generic.go
  * @Description: 泛型便捷函数 - 一行注册、一行转换
  * 利用 reflect.Type 做 key + sync.Map 缓存，消除 Model 层样板代码
