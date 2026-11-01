@@ -77,8 +77,24 @@ type fastKey struct {
 
 // derefType 指针类型解引用，与注册中心 key 语义保持一致
 func derefType(t reflect.Type) reflect.Type {
-	if t.Kind() == reflect.Ptr {
-		return t.Elem()
+	// 循环剥到底，不是只剥一层
+	//
+	// 类型参数本身可以是指针：SafeToPBs[*Model] 这种用法下，入口里的 new(M) 会得到
+	// **Model，只剥一层剩 *Model，再交给 buildFieldCache 就是
+	// reflect: NumField of non-struct type *Model 的 panic
+	//
+	// 这个 panic 只在某些测试顺序下出现，因为 converterCache 的键是规范过的类型对：
+	// 先跑的调用若已用正确类型建好转换器，后面的调用直接复用、永远走不到构造那一步
+	// 实测 -shuffle=3 必现，而 1 / 2 / 5 不现
+	//
+	// [EN] Dereferences all the way down rather than one level. A type parameter may itself be
+	// a pointer, as in SafeToPBs[*Model], where new(M) yields **Model and stripping one level
+	// leaves *Model, which panics in buildFieldCache. The panic surfaced only under some test
+	// orders because converterCache is keyed by the normalised type pair: an earlier call that
+	// built the converter from the correct type means later calls reuse it and never
+	// construct one. Reproduced reliably with -shuffle=3 and not with 1, 2 or 5
+	for t != nil && t.Kind() == reflect.Ptr {
+		t = t.Elem()
 	}
 	return t
 }

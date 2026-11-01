@@ -1687,6 +1687,15 @@ func lookupWrapper(srcType, dstType reflect.Type) (*wrapperConverter, int) {
 	return nil, 0
 }
 
+// kindDesc 给出类型的可读描述，nil 也能打印
+// [EN] A readable description of a type, printable even when nil
+func kindDesc(t reflect.Type) string {
+	if t == nil {
+		return "nil"
+	}
+	return t.String() + "（" + t.Kind().String() + "）"
+}
+
 // buildFieldCache 构建 PB↔Model 字段缓存，核心的预计算引擎
 // 这是整个转换器性能的关键：将运行时类型判断和字段映射预先计算好，
 // 后续每次转换只需按偏移量做 unsafe 指针操作
@@ -1700,6 +1709,25 @@ func lookupWrapper(srcType, dstType reflect.Type) (*wrapperConverter, int) {
 //  6. 其余字段 → slowEntries
 //  7. 构建 mergedCopyFunc 合并所有 fastEntries 的 copyFunc 为单次调用闭包
 func buildFieldCache(srcType, dstType reflect.Type, srcIsModel bool, opts *Options, transformers *TransformerRegistry) *fieldCache {
+	// 防御性规范：到这里两侧必须是 struct
+	//
+	// 不加这层的话，非 struct 类型会在下一行的 NumField 上 panic，
+	// 栈里只看到 reflect 内部与一长串泛型入口，看不出是哪个类型对出了问题
+	// 调用方已经负责剥指针，这里是第二道，顺便把类型名带进消息里
+	//
+	// [EN] A defensive normalisation: both sides must be structs by this point. Without it a
+	// non-struct type panics on the next line inside reflect, leaving a stack of reflect
+	// internals and generic entry points that does not say which type pair was at fault.
+	// Callers already dereference; this is the second line of defence and names the type
+	srcType = derefType(srcType)
+	dstType = derefType(dstType)
+	if srcType == nil || srcType.Kind() != reflect.Struct {
+		panic("pbmo: 源类型必须是结构体，实际是 " + kindDesc(srcType))
+	}
+	if dstType == nil || dstType.Kind() != reflect.Struct {
+		panic("pbmo: 目标类型必须是结构体，实际是 " + kindDesc(dstType))
+	}
+
 	dstFields := make(map[string]reflect.StructField)
 	for i := 0; i < dstType.NumField(); i++ {
 		f := dstType.Field(i)
@@ -2079,14 +2107,14 @@ type BidiConverter struct {
 // NewBidiConverter 创建双向转换器
 // FieldMapping 惰性初始化：无映射配置时不分配 map
 func NewBidiConverter(pbType, modelType interface{}, opts ...Option) *BidiConverter {
-	pbReflectType := reflect.TypeOf(pbType)
-	modelReflectType := reflect.TypeOf(modelType)
-	if pbReflectType.Kind() == reflect.Ptr {
-		pbReflectType = pbReflectType.Elem()
-	}
-	if modelReflectType.Kind() == reflect.Ptr {
-		modelReflectType = modelReflectType.Elem()
-	}
+	// 两侧都剥到底，不是只剥一层
+	// 调用方可能传进来多层指针：泛型入口里的 new(P) 在 P 本身是指针时就是 **T
+	// 只剥一层会让 pbType / modelType 停在指针上，后面 buildFieldCache 调 NumField 直接 panic
+	// [EN] Both sides are dereferenced all the way down rather than one level: a caller may
+	// pass multiple levels of indirection, as the generic entry points do when the type
+	// parameter is itself a pointer, and stopping at a pointer panics later in NumField
+	pbReflectType := derefType(reflect.TypeOf(pbType))
+	modelReflectType := derefType(reflect.TypeOf(modelType))
 	options := ApplyOptions(opts...)
 	return &BidiConverter{
 		pbType:       pbReflectType,
