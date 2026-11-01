@@ -28,7 +28,7 @@ go 1.25.0
 require google.golang.org/protobuf v1.36.11
 
 require (
-	github.com/kamalyes/go-toolbox v0.18.1
+	github.com/kamalyes/go-toolbox v0.19.0
 	github.com/stretchr/testify v1.12.1
 )
 
