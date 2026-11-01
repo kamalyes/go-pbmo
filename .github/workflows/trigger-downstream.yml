@@ -1,90 +1,64 @@
 name: Trigger Downstream
 
+# 实际流程全在 kamalyes/deploy-pipeline 的 go-trigger-downstream.yml 里，所有 Go 库共用一份
+#
+# 下游清单**不需要配置**：共用流水线直接从真实依赖图推导出谁的 go.mod 直接 require 了
+# 本模块，所以漏通知在机制上不可能发生
+#
+# 只认一级下游：带 // indirect 的传递依赖不算，它们由自己的直接上游在各自那一跳通知到
+#
+# 为什么不再手维护清单 —— 实测过的代价：go-pbmo v0.3.0 发布时，它那份手写清单里只有
+# go-rpc-gateway，漏了直接依赖它的 go-wsc，而 go-wsc 的 master 在两分钟前刚因为
+# go-pbmo 版本太旧而编译崩掉。修复就在两分钟后存在，却永远送不到
+#
+# 要覆盖默认行为才用变量：
+#   单个变量   vars.GOLIB_DOWNSTREAM_REPOS
+#   分节总表   vars.GOLIB_CONFIG 的 downstream_repos
+#   全局总表   vars.PIPELINE_CONFIG 的 golib.downstream_repos
+# 配了之后流水线仍会比对真实依赖图，缺漏就在 job summary 里点出来
+#
+# [EN] The downstream list needs no configuration: the shared pipeline derives it from which
+# repositories require this module directly, so a missed notification cannot happen by
+# oversight. A hand-maintained list once cost a broken default branch for a day -- the release
+# that fixed it existed two minutes later but the list did not name the repository that needed
+# it. Variables only override that default, and the pipeline still reports any gap
+
 on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "要通知的版本，留空则用当前 tag 名"
+        required: false
+        type: string
+      only_repos:
+        description: "只通知这几个下游，逗号或空白分隔，可填多个（例 go-wsc go-rpc-gateway）；留空则通知推导出的全部"
+        required: false
+        type: string
+      create_tag:
+        description: "下游升完依赖后是否自动打 tag，从而把联动继续往下传"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   actions: write
   contents: read
 
 jobs:
-  changes:
-    runs-on: ubuntu-latest
-    outputs:
-      should-dispatch: ${{ steps.filter.outputs.should-dispatch }}
-    steps:
-      - name: Fetch Repository
-        uses: actions/checkout@v5
-        with:
-          fetch-depth: 0
-
-      - name: Check changed files
-        id: filter
-        shell: bash
-        run: |
-          current_tag="${GITHUB_REF_NAME}"
-          previous_tag="$(git tag --sort=-v:refname | grep -v "^${current_tag}$" | head -n 1 || true)"
-
-          if [ -z "${previous_tag}" ]; then
-            echo "should-dispatch=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          changed_files="$(git diff --name-only "${previous_tag}..${current_tag}")"
-          if [ -z "${changed_files}" ]; then
-            echo "should-dispatch=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          if echo "${changed_files}" | grep -Ev '(^docs/|\.md$)' >/dev/null; then
-            echo "should-dispatch=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "should-dispatch=false" >> "$GITHUB_OUTPUT"
-          fi
-
-  dispatch:
-    needs: changes
-    if: needs.changes.outputs.should-dispatch == 'true'
-    runs-on: ubuntu-latest
-    # 跨仓派发必须用 PAT 或 GitHub App token：GITHUB_TOKEN 只对当前仓库有权限，
-    # 用它调别的仓库的 dispatch 接口会被拒
-    # secrets 上下文不能直接写在 if 里，所以先落到 job 级 env 再判断，
-    # 未配置时让步骤跳过而不是整条工作流以
-    # "Parameter token or opts.auth is required" 变红
-    # [EN] Cross-repository dispatch needs a PAT or App token; GITHUB_TOKEN is
-    # scoped to this repository only. The secrets context cannot be used in an
-    # if expression, so it is surfaced as a job-level env and checked there,
-    # which skips the step instead of failing the whole workflow when unset
-    env:
-      DISPATCH_TOKEN: ${{ secrets.GH_GPA_TOKEN }}
-    strategy:
-      matrix:
-        repo:
-          # go-rpc-gateway 只是间接依赖（go.mod 里带 // indirect），派发后
-          # go mod tidy 通常会把它改回去，保留它是为了让闭包版本不落后太多
-          # 真正的直接使用者是 go-bizerror/pbx，但它是嵌套子模块，
-          # go-bizerror 的 bump-upstream 只动根 go.mod，派发过去会是空操作，
-          # 因此不列入；该子模块的版本跟进目前需要手动执行
-          # [EN] go-rpc-gateway only holds an indirect requirement. The real
-          # direct consumer is go-bizerror/pbx, a nested module that the root
-          # bump-upstream cannot reach, so dispatching there would be a no-op
-          # and it is left out; that submodule is bumped by hand for now
-          - kamalyes/go-rpc-gateway
-    steps:
-      - name: Warn when dispatch token is missing
-        if: env.DISPATCH_TOKEN == ''
-        run: |
-          echo "::warning::未配置 GH_GPA_TOKEN，跳过向 ${{ matrix.repo }} 的派发；\
-          下游不会自动升级本库版本，需要手动执行 go get 并提交"
-
-      - name: Dispatch to ${{ matrix.repo }}
-        if: env.DISPATCH_TOKEN != ''
-        uses: peter-evans/repository-dispatch@v3
-        with:
-          token: ${{ env.DISPATCH_TOKEN }}
-          repository: ${{ matrix.repo }}
-          event-type: upstream-updated
-          client-payload: >-
-            {"module":"github.com/kamalyes/go-pbmo","version":"${{ github.ref_name }}","sha":"${{ github.sha }}","commit_message":"📦 deps: 同步上游依赖 ${{ github.ref_name }}\n\n- 📦 更新 github.com/kamalyes/go-pbmo 到 ${{ github.ref_name }} (go.mod, go.sum)\n- 🔄 自动联动下游版本标签 (bump-upstream.yml)\n\nsync upstream ${{ github.ref_name }}"}
+  trigger:
+    uses: kamalyes/deploy-pipeline/.github/workflows/go-trigger-downstream.yml@master
+    with:
+      version: ${{ inputs.version }}
+      only-repos: ${{ inputs.only_repos }}
+      create-tag: ${{ inputs.create_tag == true }}
+    secrets:
+      # 跨仓库 dispatch 用不了 GITHUB_TOKEN，它只对本仓库有效，所以这里必须有 App 或 PAT
+      # [EN] GITHUB_TOKEN is scoped to its own repository and cannot dispatch across
+      # repositories, so an App token or a PAT is required
+      APP_ID: ${{ secrets.APP_ID }}
+      APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
+      GH_GPA_TOKEN: ${{ secrets.GH_GPA_TOKEN }}
+      PIPELINE_SECRETS: ${{ secrets.PIPELINE_SECRETS }}
